@@ -12,8 +12,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 
-MODES = ("one", "everyone", "main")
-MODE_LABELS = {"one": "One person", "everyone": "Everyone", "main": "Whoever's on screen"}
+MODES = ("cast", "everyone", "main")
+MODE_LABELS = {"cast": "Picked people", "everyone": "Everyone", "main": "Whoever's on screen"}
 DEFAULT_THRESHOLD = 0.35
 
 
@@ -26,8 +26,9 @@ class Segment:
     start: int
     end: int
     mode: str = "everyone"
-    ref: str | None = None  # reference person id, for mode "one"
-    threshold: float = DEFAULT_THRESHOLD  # match strictness, for mode "one"
+    face: str | None = None  # face to put in (everyone / main); None = the project's default face
+    cast: list[dict] = field(default_factory=list)  # picked people: [{"ref": person id, "face": face id}]
+    threshold: float = DEFAULT_THRESHOLD  # match strictness for picked people
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
 
     @property
@@ -35,9 +36,9 @@ class Segment:
         return self.end - self.start
 
     def settings_key(self) -> tuple:
-        if self.mode == "one":
-            return (self.mode, self.ref, round(self.threshold, 3))
-        return (self.mode,)
+        if self.mode == "cast":
+            return (self.mode, tuple((c["ref"], c.get("face")) for c in self.cast), round(self.threshold, 3))
+        return (self.mode, self.face)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -109,6 +110,11 @@ def from_json(items: list[dict], fps: Fraction) -> list[Segment]:
     segs = []
     for it in items:
         mode = it.get("mode", "everyone")
+        cast = [dict(ref=str(c["ref"]), face=c.get("face") or None) for c in it.get("cast") or [] if c.get("ref")]
+        if mode == "one":  # older single-person form
+            mode = "cast"
+            if it.get("ref"):
+                cast = [{"ref": it["ref"], "face": it.get("face") or None}]
         if mode not in MODES:
             raise SegmentError(f"Unknown mode \"{mode}\". Use one of: {', '.join(MODES)}.")
         threshold = float(it.get("threshold", DEFAULT_THRESHOLD))
@@ -118,7 +124,8 @@ def from_json(items: list[dict], fps: Fraction) -> list[Segment]:
             start=parse_time(it["start"], fps),
             end=parse_time(it["end"], fps),
             mode=mode,
-            ref=it.get("ref") or None,
+            face=it.get("face") or None,
+            cast=cast,
             threshold=threshold,
         )
         if it.get("id"):
@@ -139,7 +146,9 @@ def normalize(segments: list[Segment], total_frames: int) -> list[Segment]:
         end = max(0, min(int(s.end), total_frames))
         if end <= start:
             continue
-        clamped.append(Segment(start, end, s.mode, s.ref if s.mode == "one" else None, s.threshold, s.id))
+        cast = [dict(c) for c in s.cast] if s.mode == "cast" else []
+        face = None if s.mode == "cast" else s.face
+        clamped.append(Segment(start, end, s.mode, face, cast, s.threshold, s.id))
     clamped.sort(key=lambda s: (s.start, s.end))
     out: list[Segment] = []
     for s in clamped:
@@ -164,13 +173,21 @@ def stats(segments: list[Segment], total_frames: int) -> dict:
     return {"frames_to_process": process, "total_frames": total_frames, "percent_skipped": round(skipped, 1)}
 
 
-def check_ready(segments: list[Segment], references: set[str]) -> None:
+def check_ready(segments: list[Segment], references: set[str], faces: set[str], default_face: str | None) -> None:
     """Raise if the segments can't be rendered yet."""
     if not segments:
         raise SegmentError("Mark at least one segment first: press I at the start and O at the end.")
     for i, s in enumerate(segments, 1):
-        if s.mode == "one" and (not s.ref or s.ref not in references):
-            raise SegmentError(
-                f"Segment {i} is set to One person, but nobody is picked yet. "
-                "Pause on a frame showing them and click Pick person."
-            )
+        if s.mode == "cast":
+            if not s.cast:
+                raise SegmentError(
+                    f"Segment {i} is set to Picked people, but nobody is picked yet. "
+                    "Pause inside it and drag a face from the faces panel onto a person."
+                )
+            for c in s.cast:
+                if c["ref"] not in references:
+                    raise SegmentError(f"Segment {i}: one of the picked people is missing. Pick them again.")
+                if (c.get("face") or default_face) not in faces:
+                    raise SegmentError(f"Segment {i}: the face for one of the picked people was deleted. Drag another face onto them.")
+        elif (s.face or default_face) not in faces:
+            raise SegmentError("Add a face to put in first: drop a photo onto the faces panel.")

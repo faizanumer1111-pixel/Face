@@ -1,7 +1,7 @@
 import numpy as np
 
 from app.faces import Face
-from app.targets import EveryoneSelector, MainFaceSelector, ReferenceSelector, iou, make_selector
+from app.targets import CastSelector, EveryoneSelector, KpsSmoother, MainFaceSelector, ReferenceSelector, iou, make_selector
 
 SHAPE = (1080, 1920, 3)
 
@@ -138,4 +138,44 @@ def test_reference_survives_a_missed_detection():
 def test_make_selector():
     assert isinstance(make_selector("everyone"), EveryoneSelector)
     assert isinstance(make_selector("main"), MainFaceSelector)
-    assert isinstance(make_selector("one", unit(1)), ReferenceSelector)
+    assert isinstance(make_selector("one", unit(1)), CastSelector)
+    assert isinstance(make_selector("cast", cast=[(unit(1), "f1")]), CastSelector)
+
+
+def test_sources_are_set():
+    faces = [face(0, 0, 100), face(500, 0, 300)]
+    assert {f.source for f in make_selector("everyone", source="me").select(faces, SHAPE)} == {"me"}
+    (f,) = make_selector("main", source="me").select([face(0, 0, 100), face(500, 0, 300)], SHAPE)
+    assert f.source == "me"
+
+
+def test_cast_gives_each_person_their_own_face():
+    a, b, c = unit(1), unit(2), unit(3)
+    sel = CastSelector([(a, "face-for-a"), (b, "face-for-b")], threshold=0.35)
+    fa, fb, fc = face(0, 0, 200, mix(a, c, 0.7)), face(600, 0, 200, mix(b, c, 0.7)), face(1200, 0, 200, c)
+    picked = sel.select([fa, fb, fc], SHAPE)
+    assert {(id(f), f.source) for f in picked} == {(id(fa), "face-for-a"), (id(fb), "face-for-b")}
+
+
+def test_cast_conflict_goes_to_the_closer_match():
+    a, b = unit(1), unit(2)
+    sel = CastSelector([(a, "A"), (mix(a, b, 0.6), "B")], threshold=0.35)
+    only = face(0, 0, 200, a)  # looks exactly like a, less like the second person
+    (f,) = sel.select([only], SHAPE)
+    assert f.source == "A"
+
+
+def test_smoother_steadies_jitter_but_follows_movement():
+    sm = KpsSmoother()
+    base = np.array([[40, 50], [80, 50], [60, 70], [45, 90], [75, 90]], np.float32)
+    f = face(0, 0, 120)
+    f.kps = base.copy()
+    sm.smooth([f])
+    jittery = face(1, 0, 120)
+    jittery.kps = base + 2.0  # 2 px of jitter on a 120 px face
+    sm.smooth([jittery])
+    assert np.abs(jittery.kps - base).max() < 1.0  # mostly averaged away
+    moved = face(30, 0, 120)
+    moved.kps = base + 30.0  # a real head movement
+    sm.smooth([moved])
+    assert np.abs(moved.kps - (base + 30.0)).max() < 2.0  # follows it straight away

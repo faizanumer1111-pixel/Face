@@ -28,7 +28,38 @@ log = logging.getLogger(__name__)
 DET_MODEL = "det_10g.onnx"
 REC_MODEL = "w600k_r50.onnx"
 SWAP_MODEL = "inswapper_128.onnx"
+ENHANCE_MODEL = "gfpgan_1.4.onnx"  # sharper faces
+OCCLUDE_MODEL = "xseg_1.onnx"  # hands / hair / objects in front of the face
 MODEL_FILES = (DET_MODEL, REC_MODEL, SWAP_MODEL)
+OPTIONAL_MODEL_FILES = (ENHANCE_MODEL, OCCLUDE_MODEL)
+
+# Face template GFPGAN was trained on (FFHQ alignment), for a 512 px crop.
+FFHQ_512 = np.array(
+    [
+        [0.37691676, 0.46864664],
+        [0.62285697, 0.46912813],
+        [0.50123859, 0.61331904],
+        [0.39308822, 0.72541100],
+        [0.61150205, 0.72490465],
+    ],
+    dtype=np.float32,
+) * 512
+
+
+@dataclass
+class SwapOptions:
+    """How each face is swapped. Defaults are what looks most natural."""
+
+    occlusion: bool = True  # keep hands, hair and objects in front of the face
+    enhance: float = 0.6  # face sharpening strength, 0 = off
+    color_match: bool = True  # match the new face to the scene's lighting
+
+    @classmethod
+    def from_json(cls, d: dict | None) -> "SwapOptions":
+        d = d or {}
+        return cls(occlusion=bool(d.get("occlusion", True)),
+                   enhance=float(min(1.0, max(0.0, d.get("enhance", 0.6)))),
+                   color_match=bool(d.get("color_match", True)))
 
 # Five-point face template used by ArcFace and inswapper alignment.
 ARCFACE_DST = np.array(
@@ -49,6 +80,7 @@ class Face:
     kps: np.ndarray  # (5, 2) eyes, nose, mouth corners
     score: float
     embedding: np.ndarray | None = None  # L2-normalised (512,) when computed
+    source: str | None = None  # id of the face to put on this one, set by the selectors
 
     @property
     def area(self) -> float:
@@ -346,17 +378,21 @@ class Swapper:
         lat /= np.linalg.norm(lat)
         return lat.astype(np.float32)
 
-    def swap(self, img: np.ndarray, face: Face, latent: np.ndarray) -> None:
-        """Swap `face` in `img` in place."""
+    def swap(self, img: np.ndarray, face: Face, latent: np.ndarray, extra_mask: np.ndarray | None = None,
+             color_match: bool = False) -> tuple[np.ndarray, np.ndarray]:
+        """Swap `face` in `img` in place. Returns the swapped 128 px crop and its alignment."""
         size = self.size
         aimg, m = norm_crop(img, face.kps, size)
         blob = cv2.dnn.blobFromImage(aimg, 1.0 / 255.0, (size, size), (0.0, 0.0, 0.0), swapRB=True)
         pred = self.session.run(self.output_names, {self.input_names[0]: blob, self.input_names[1]: latent})[0]
         bgr_fake = np.clip(255 * pred.transpose((0, 2, 3, 1))[0], 0, 255).astype(np.uint8)[:, :, ::-1]
-        self.paste_back(img, bgr_fake, m)
+        if color_match:
+            bgr_fake = match_lighting(bgr_fake, aimg)
+        self.paste_back(img, bgr_fake, m, extra_mask)
+        return bgr_fake, m
 
     @staticmethod
-    def paste_back(img: np.ndarray, bgr_fake: np.ndarray, m: np.ndarray) -> None:
+    def paste_back(img: np.ndarray, bgr_fake: np.ndarray, m: np.ndarray, extra_mask: np.ndarray | None = None) -> None:
         h, w = img.shape[:2]
         size = bgr_fake.shape[0]
         im = cv2.invertAffineTransform(m)
@@ -389,10 +425,119 @@ class Swapper:
         mask = cv2.erode(mask, np.ones((k, k), np.uint8), iterations=1)
         k = max(mask_size // 20, 5)
         mask = cv2.GaussianBlur(mask, (2 * k + 1, 2 * k + 1), 0)
-        mask = (mask / 255.0)[:, :, None]
+        mask = mask / 255.0
+        if extra_mask is not None:
+            mask *= cv2.warpAffine(extra_mask.astype(np.float32), im_roi, (rw, rh), borderValue=0.0)
+        mask = mask[:, :, None]
         roi = img[y0:y1, x0:x1]
         merged = mask * fake.astype(np.float32) + (1 - mask) * roi.astype(np.float32)
         img[y0:y1, x0:x1] = merged.astype(np.uint8)
+
+
+_INNER = None
+
+
+def _inner_face_mask(size: int) -> np.ndarray:
+    """Ellipse over the cheeks, eyes and mouth of an aligned crop (no hair, no background)."""
+    global _INNER
+    if _INNER is None or _INNER.shape[0] != size:
+        m = np.zeros((size, size), np.uint8)
+        cv2.ellipse(m, (size // 2, int(size * 0.56)), (int(size * 0.28), int(size * 0.34)), 0, 0, 360, 1, -1)
+        _INNER = m.astype(bool)
+    return _INNER
+
+
+def match_lighting(fake: np.ndarray, original: np.ndarray, strength: float = 0.8) -> np.ndarray:
+    """Shift the new face's brightness and colour cast towards the original face's.
+
+    Works in LAB on the inner face only. Brightness follows the scene closely; colour
+    moves only partway so the new person's skin tone is kept.
+    """
+    inner = _inner_face_mask(fake.shape[0])
+    f = cv2.cvtColor(fake, cv2.COLOR_BGR2LAB).astype(np.float32)
+    o = cv2.cvtColor(original, cv2.COLOR_BGR2LAB).astype(np.float32)
+    shift = (o[inner].mean(axis=0) - f[inner].mean(axis=0)) * np.array([1.0, 0.35, 0.35], np.float32) * strength
+    f += shift
+    return cv2.cvtColor(np.clip(f, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
+def paste_crop(img: np.ndarray, crop: np.ndarray, m: np.ndarray, mask: np.ndarray) -> None:
+    """Blend an aligned crop back into `img` (in place) through `mask` (crop coordinates, 0..1)."""
+    h, w = img.shape[:2]
+    size = crop.shape[0]
+    im = cv2.invertAffineTransform(m)
+    corners = np.array([[0, 0, 1], [size, 0, 1], [0, size, 1], [size, size, 1]], dtype=np.float64) @ im.T
+    x0, y0 = max(int(np.floor(corners[:, 0].min())) - 2, 0), max(int(np.floor(corners[:, 1].min())) - 2, 0)
+    x1, y1 = min(int(np.ceil(corners[:, 0].max())) + 2, w), min(int(np.ceil(corners[:, 1].max())) + 2, h)
+    if x1 <= x0 or y1 <= y0:
+        return
+    im_roi = im.copy()
+    im_roi[0, 2] -= x0
+    im_roi[1, 2] -= y0
+    warped = cv2.warpAffine(crop, im_roi, (x1 - x0, y1 - y0), borderValue=0.0).astype(np.float32)
+    a = cv2.warpAffine(mask.astype(np.float32), im_roi, (x1 - x0, y1 - y0), borderValue=0.0)[:, :, None]
+    roi = img[y0:y1, x0:x1].astype(np.float32)
+    img[y0:y1, x0:x1] = (a * warped + (1 - a) * roi).astype(np.uint8)
+
+
+class Occluder:
+    """XSeg occlusion model: which parts of an aligned face are actually visible."""
+
+    def __init__(self, session: ort.InferenceSession):
+        self.session = session
+        self.input_name = session.get_inputs()[0].name
+        self.size = 256
+
+    def mask(self, img: np.ndarray, kps: np.ndarray, size: int = 128) -> np.ndarray:
+        """Visibility mask (1 = face, 0 = something in front) aligned like the `size` px swap crop."""
+        crop, _ = norm_crop(img, kps, self.size)
+        blob = (crop.astype(np.float32) / 255.0)[None]
+        out = self.session.run(None, {self.input_name: blob})[0][0, :, :, 0]
+        out = cv2.GaussianBlur(out.clip(0, 1), (0, 0), 5).clip(0.5, 1)
+        out = (out - 0.5) * 2
+        return cv2.resize(out, (size, size), interpolation=cv2.INTER_AREA)
+
+
+_BOX = None
+
+
+def _box_mask(size: int = 512) -> np.ndarray:
+    global _BOX
+    if _BOX is None:
+        blur = int(size * 0.5 * 0.3)
+        edge = max(blur // 2, 1)
+        m = np.ones((size, size), np.float32)
+        m[:edge, :] = m[-edge:, :] = 0
+        m[:, :edge] = m[:, -edge:] = 0
+        _BOX = cv2.GaussianBlur(m, (0, 0), blur * 0.25)
+    return _BOX
+
+
+class Enhancer:
+    """GFPGAN 1.4: restores detail in the 128 px swapped face."""
+
+    def __init__(self, session: ort.InferenceSession):
+        self.session = session
+        self.input_name = session.get_inputs()[0].name
+
+    def enhance(self, img: np.ndarray, kps: np.ndarray, strength: float,
+                visible_128: np.ndarray | None = None, m128: np.ndarray | None = None) -> None:
+        """Sharpen the face at `kps` in place. `visible_128` (with its alignment `m128`) keeps
+        whatever is in front of the face untouched."""
+        m = umeyama(kps, FFHQ_512)
+        crop = cv2.warpAffine(img, m, (512, 512), borderMode=cv2.BORDER_REPLICATE)
+        blob = ((crop[:, :, ::-1].astype(np.float32) / 255.0 - 0.5) / 0.5).transpose(2, 0, 1)[None]
+        out = self.session.run(None, {self.input_name: blob})[0][0]
+        out = ((np.clip(out, -1, 1) + 1) / 2).transpose(1, 2, 0)
+        restored = (out * 255.0).round().astype(np.uint8)[:, :, ::-1]
+        mask = _box_mask(512) * strength
+        if visible_128 is not None and m128 is not None:
+            # 128-crop coordinates -> 512-crop coordinates
+            a = np.vstack([m128, [0, 0, 1]])
+            b = np.vstack([m, [0, 0, 1]])
+            to512 = (b @ np.linalg.inv(a))[:2]
+            mask = mask * cv2.warpAffine(visible_128.astype(np.float32), to512, (512, 512), borderValue=0.0)
+        paste_crop(img, restored, m, mask)
 
 
 # --------------------------------------------------------------------------- #
@@ -436,11 +581,28 @@ class FaceEngine:
         self.detector = Detector(det_sess)
         self.embedder = Embedder(rec_sess)
         self.swapper = Swapper(swap_sess, load_emap(models_dir / SWAP_MODEL))
+        self.enhancer = self.occluder = None
+        self.enhance_provider = self.occlude_provider = None
+        if (models_dir / ENHANCE_MODEL).exists():
+            sess, self.enhance_provider = make_session(models_dir / ENHANCE_MODEL, providers.get("enhance", "cpu"), cache)
+            self.enhancer = Enhancer(sess)
+        if (models_dir / OCCLUDE_MODEL).exists():
+            sess, self.occlude_provider = make_session(models_dir / OCCLUDE_MODEL, providers.get("occlude", "cpu"), cache)
+            self.occluder = Occluder(sess)
         log.info("Models loaded in %.1fs (%s)", time.time() - t0, self.providers)
 
     @property
     def providers(self) -> dict[str, str]:
-        return {"det": self.det_provider, "rec": self.rec_provider, "swap": self.swap_provider}
+        out = {"det": self.det_provider, "rec": self.rec_provider, "swap": self.swap_provider}
+        if self.enhancer:
+            out["enhance"] = self.enhance_provider
+        if self.occluder:
+            out["occlude"] = self.occlude_provider
+        return out
+
+    @property
+    def features(self) -> dict[str, bool]:
+        return {"enhance": self.enhancer is not None, "occlusion": self.occluder is not None}
 
     def detect(self, img: np.ndarray, det_size: int = 640) -> list[Face]:
         return self.detector.detect(img, det_size)
@@ -451,8 +613,15 @@ class FaceEngine:
     def latent(self, embedding: np.ndarray) -> np.ndarray:
         return self.swapper.latent(embedding)
 
-    def swap(self, img: np.ndarray, face: Face, latent: np.ndarray) -> None:
-        self.swapper.swap(img, face, latent)
+    def swap(self, img: np.ndarray, face: Face, latent: np.ndarray, opts: SwapOptions | None = None) -> None:
+        """Swap one face in place: occlusion mask, swap, lighting match, sharpening."""
+        opts = opts or SwapOptions(occlusion=False, enhance=0.0, color_match=False)
+        visible = None
+        if opts.occlusion and self.occluder is not None:
+            visible = self.occluder.mask(img, face.kps, self.swapper.size)
+        _, m128 = self.swapper.swap(img, face, latent, visible, opts.color_match)
+        if opts.enhance > 0 and self.enhancer is not None:
+            self.enhancer.enhance(img, face.kps, opts.enhance, visible, m128)
 
 
 def is_mac() -> bool:

@@ -56,9 +56,10 @@ def test_touching_different_settings_stay_separate():
 def test_overlap_with_different_settings_is_an_error():
     with pytest.raises(SegmentError, match="overlap"):
         normalize([Segment(0, 40, "everyone"), Segment(30, 60, "main")], 300)
-    # same mode "one" but different people also conflicts
+    # same mode but different people also conflicts
     with pytest.raises(SegmentError):
-        normalize([Segment(0, 40, "one", ref="a"), Segment(30, 60, "one", ref="b")], 300)
+        normalize([Segment(0, 40, "cast", cast=[{"ref": "a", "face": None}]),
+                   Segment(30, 60, "cast", cast=[{"ref": "b", "face": None}])], 300)
 
 
 def test_clamp_sort_and_drop_empty():
@@ -66,9 +67,14 @@ def test_clamp_sort_and_drop_empty():
     assert [(s.start, s.end) for s in out] == [(0, 10), (250, 300)]
 
 
-def test_ref_dropped_unless_one_mode():
-    (s,) = normalize([Segment(0, 10, "everyone", ref="x")], 100)
-    assert s.ref is None
+def test_cast_dropped_unless_cast_mode():
+    (s,) = normalize([Segment(0, 10, "everyone", cast=[{"ref": "x", "face": None}])], 100)
+    assert s.cast == []
+
+
+def test_old_one_person_form_becomes_cast():
+    (s,) = from_json([{"start": 0, "end": 10, "mode": "one", "ref": "r1"}], F30)
+    assert s.mode == "cast" and s.cast == [{"ref": "r1", "face": None}]
 
 
 def test_stats():
@@ -78,14 +84,19 @@ def test_stats():
 
 def test_check_ready():
     with pytest.raises(SegmentError, match="at least one segment"):
-        check_ready([], set())
+        check_ready([], set(), {"f"}, "f")
     with pytest.raises(SegmentError, match="nobody is picked"):
-        check_ready([Segment(0, 10, "one")], set())
-    check_ready([Segment(0, 10, "one", ref="r1"), Segment(20, 30, "main")], {"r1"})
+        check_ready([Segment(0, 10, "cast")], set(), {"f"}, "f")
+    with pytest.raises(SegmentError, match="Add a face"):
+        check_ready([Segment(0, 10, "everyone")], set(), set(), None)
+    with pytest.raises(SegmentError, match="deleted"):
+        check_ready([Segment(0, 10, "cast", cast=[{"ref": "r1", "face": "gone"}])], {"r1"}, {"f"}, "f")
+    check_ready([Segment(0, 10, "cast", cast=[{"ref": "r1", "face": None}]), Segment(20, 30, "main")],
+                {"r1"}, {"f"}, "f")
 
 
 def test_bad_mode_and_threshold():
     with pytest.raises(SegmentError):
         from_json([{"start": 0, "end": 10, "mode": "nobody"}], F30)
     with pytest.raises(SegmentError):
-        from_json([{"start": 0, "end": 10, "mode": "one", "threshold": 1.5}], F30)
+        from_json([{"start": 0, "end": 10, "mode": "cast", "threshold": 1.5}], F30)

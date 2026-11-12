@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from . import config
-from .faces import FaceEngine, load_provider_settings
+from .faces import FaceEngine, SwapOptions, load_provider_settings
 from .pipeline import RenderRequest, render
 from .segments import MODES, SegmentError, from_json, normalize, parse_time, stats
 from .video_io import VideoError, load_image, prepare_source, read_frame
@@ -29,7 +29,7 @@ def parse_segment_spec(spec: str) -> dict:
     body, mode = spec, "everyone"
     if ":" in spec:
         head, tail = spec.rsplit(":", 1)
-        if tail in MODES:
+        if tail in MODES or tail == "one":
             body, mode = head, tail
     if "-" not in body:
         raise SegmentError(f'Segment "{spec}" should look like START-END:MODE, e.g. 2.0-5.5:everyone')
@@ -56,6 +56,9 @@ def cmd_render(args) -> int:
             return 2
         source = _largest(faces)
         src_emb = engine.embed(photo, source)
+        vr_format = args.vr_format or info.vr_format
+        if vr_format != "flat":
+            print(f"Video format: {vr_format}")
 
         items = [parse_segment_spec(s) for s in args.segment]
         refs: dict[str, np.ndarray] = {}
@@ -80,9 +83,12 @@ def cmd_render(args) -> int:
 
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        req = RenderRequest(video_path=work, info=info, source_embedding=src_emb, segments=segs, references=refs,
-                            output_path=out, output_mode="clips" if args.clips else "full",
-                            det_size=args.det_size, max_quality=args.max_quality)
+        opts = SwapOptions(occlusion=not args.no_occlusion, enhance=args.sharpen, color_match=not args.no_light_match)
+        req = RenderRequest(video_path=work, info=info, faces={"photo": src_emb}, default_face="photo",
+                            segments=segs, references=refs, output_path=out,
+                            output_mode="clips" if args.clips else "full", det_size=args.det_size,
+                            max_quality=args.max_quality, options=opts, steady=not args.no_steady,
+                            vr_format=vr_format)
 
         def progress(s):
             eta = f"{s.eta_seconds:.0f}s" if s.eta_seconds is not None else "?"
@@ -107,7 +113,8 @@ def cmd_benchmark(args) -> int:
     if args.json:
         print(json.dumps(report, indent=2))
         return 0
-    names = {"det": "Face detection", "rec": "Face matching", "swap": "Face swap"}
+    names = {"det": "Face detection", "rec": "Face matching", "swap": "Face swap", "enhance": "Sharper faces",
+             "occlude": "Hands in front"}
     labels = {"coreml": "Mac GPU (CoreML)", "cuda": "NVIDIA GPU", "cpu": "CPU"}
     for key, m in report["models"].items():
         parts = []
@@ -121,7 +128,7 @@ def cmd_benchmark(args) -> int:
         print(f"  {names[key]:15s} -> using {labels[m['picked']]:17s} [{'; '.join(parts)}]")
     fps = report.get("estimated_fps_one_face")
     if fps:
-        print(f"  Estimated speed with one face per frame: about {fps} frames per second")
+        print(f"  Estimated speed with one face per frame, all improvements on: about {fps} frames per second")
     return 0
 
 
@@ -137,7 +144,13 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--out", required=True)
     r.add_argument("--clips", action="store_true", help="output only the segments, joined")
     r.add_argument("--max-quality", action="store_true", help="slower, higher quality encode")
-    r.add_argument("--det-size", type=int, default=640, choices=[320, 480, 640])
+    r.add_argument("--det-size", type=int, default=640, choices=[320, 640, 960])
+    r.add_argument("--sharpen", type=float, default=0.6, help="face sharpening 0-1 (0 = off)")
+    r.add_argument("--no-occlusion", action="store_true", help="don't keep hands/hair in front of the face")
+    r.add_argument("--no-light-match", action="store_true", help="don't match the new face to the lighting")
+    r.add_argument("--no-steady", action="store_true", help="don't smooth face movement")
+    r.add_argument("--vr-format", choices=sorted(__import__("app.vr", fromlist=["FORMATS"]).FORMATS),
+                   help="override the detected format (vr180_sbs, vr360_mono, ...)")
     r.add_argument("--ref-time", help="for :one segments, a time showing the person to swap")
     r.add_argument("--ref-face", type=int, default=0, help="which face at --ref-time, 0 = leftmost")
     r.add_argument("--threshold", type=float, default=0.35, help="match strictness for :one segments")

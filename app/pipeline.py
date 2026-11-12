@@ -17,10 +17,12 @@ from typing import Callable
 
 import numpy as np
 
-from .faces import Face
+from .faces import Face, SwapOptions
+from .processor import FrameProcessor, selector_for
 from .segments import Segment
 from .targets import make_selector
-from .video_io import FrameReader, FrameWriter, VideoError, VideoInfo
+from .video_io import FrameReader, FrameWriter, VideoError, VideoInfo, finalize_vr
+from .vr import Layout
 
 log = logging.getLogger(__name__)
 
@@ -35,13 +37,17 @@ class Cancelled(Exception):
 class RenderRequest:
     video_path: Path
     info: VideoInfo
-    source_embedding: np.ndarray
+    faces: dict[str, np.ndarray]  # face library: id -> embedding of the face to put in
+    default_face: str | None
     segments: list[Segment]
-    references: dict[str, np.ndarray]
+    references: dict[str, np.ndarray]  # picked people: id -> embedding
     output_path: Path
     output_mode: str = "full"
     det_size: int = 640
     max_quality: bool = False
+    options: SwapOptions = field(default_factory=SwapOptions)
+    steady: bool = True
+    vr_format: str = "flat"
 
 
 @dataclass
@@ -69,20 +75,21 @@ class _Timing:
     started: float = field(default_factory=time.time)
 
 
-def process_frame(engine, frame: np.ndarray, selector, latent: np.ndarray, det_size: int) -> tuple[list[Face], list[Face]]:
-    """Detect, choose and swap faces in one frame (in place)."""
+def process_frame(engine, frame: np.ndarray, selector, latent: np.ndarray, det_size: int,
+                  opts: SwapOptions | None = None) -> tuple[list[Face], list[Face]]:
+    """Detect, choose and swap faces in one normal frame (in place), all with one face."""
     faces = engine.detect(frame, det_size)
     if faces and selector.needs_embeddings:
         for f in faces:
             engine.embed(frame, f)
     targets = selector.select(faces, frame.shape)
     for f in targets:
-        engine.swap(frame, f, latent)
+        engine.swap(frame, f, latent, opts)
     return faces, targets
 
 
-def _selector_for(seg: Segment, references: dict[str, np.ndarray], fps: float):
-    return make_selector(seg.mode, references.get(seg.ref) if seg.ref else None, seg.threshold, fps)
+def latents_for(engine, faces: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    return {fid: engine.latent(emb) for fid, emb in faces.items()}
 
 
 def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None] | None = None,
@@ -94,7 +101,8 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
     info = req.info
     fps = float(info.fps)
     cancel = cancel or threading.Event()
-    latent = engine.latent(req.source_embedding)
+    latents = latents_for(engine, req.faces)
+    layout = Layout.of(req.vr_format)
     segments = sorted(req.segments, key=lambda s: s.start)
 
     stats = RenderStats(swap_total=sum(s.length for s in segments))
@@ -109,7 +117,10 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
 
     tmp = req.output_path.with_name(req.output_path.stem + ".partial.mp4")
     log_path = log_path or req.output_path.with_suffix(".log")
-    writer = FrameWriter(tmp, info, req.video_path, audio, req.max_quality, log_path)
+    writer = FrameWriter(tmp, info, req.video_path, audio, req.max_quality, log_path, vr=layout.is_vr,
+                         index_at_end=not layout.is_flat_mono)
+    # Keep about 400 MB of frames in flight at most (8K VR frames are ~90 MB each).
+    depth = max(2, min(8, int(400e6 // max(info.frame_bytes, 1))))
     timing = _Timing()
     last_report = [0.0]
 
@@ -130,7 +141,7 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
             on_progress(stats)
 
     # Writer thread: encode while the next frames are being swapped.
-    out_q: queue.Queue = queue.Queue(maxsize=8)
+    out_q: queue.Queue = queue.Queue(maxsize=depth)
     writer_error: list[BaseException] = []
 
     def write_loop() -> None:
@@ -156,7 +167,7 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
     try:
         for r_start, r_end in ranges:
             reader = FrameReader(req.video_path, info, start=r_start, count=r_end - r_start)
-            in_q: queue.Queue = queue.Queue(maxsize=4)
+            in_q: queue.Queue = queue.Queue(maxsize=max(2, depth // 2))
             stop = threading.Event()
 
             def read_loop(reader=reader, n=r_end - r_start, in_q=in_q, stop=stop) -> None:
@@ -192,11 +203,13 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
                     t0 = time.perf_counter()
                     if seg is not None:
                         if selector is None:
-                            selector = _selector_for(seg, req.references, fps)
-                        _, targets = process_frame(engine, frame, selector, latent, req.det_size)
+                            selector = FrameProcessor(engine, layout, latents, req.options, req.det_size,
+                                                      selector_for(seg, req.references, req.default_face, fps),
+                                                      steady=req.steady)
+                        result = selector.process(frame)
                         stats.frames_swapped += 1
-                        stats.faces_swapped += len(targets)
-                        if not targets:
+                        stats.faces_swapped += result.swapped
+                        if not result.swapped:
                             stats.frames_without_target += 1
                         put(frame)
                         timing.swap_t += time.perf_counter() - t0
@@ -222,7 +235,10 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
         if writer_error:
             raise writer_error[0]
         writer.finish()
-        tmp.replace(req.output_path)
+        if layout.is_vr or not layout.is_flat_mono:
+            finalize_vr(tmp, req.output_path, req.vr_format)
+        else:
+            tmp.replace(req.output_path)
     except BaseException:
         if wthread.is_alive():
             # Unblock the writer thread, then kill the encoder.

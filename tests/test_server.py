@@ -59,6 +59,13 @@ def test_writes_need_the_page_header(client, small_video):
     assert client.get("/api/status").status_code == 200  # reads are fine
 
 
+def add_face(client, tmp_path, name="Model A.jpg"):
+    with open(face_photo(tmp_path), "rb") as f:
+        r = client.post("/api/faces", files={"photo": (name, f, "image/jpeg")}, headers=H)
+    assert r.status_code == 200, r.text
+    return r.json()["added"]
+
+
 def test_full_flow(client, small_video, tmp_path):
     with open(small_video, "rb") as f:
         r = client.post("/api/projects", files={"video": ("my ad.mp4", f, "video/mp4")}, headers=H)
@@ -66,23 +73,27 @@ def test_full_flow(client, small_video, tmp_path):
     p = r.json()
     pid = p["id"]
     assert p["video"]["total_frames"] == 75
+    assert p["settings"]["vr_format"] == "flat"
 
     # browser can seek: range requests work
     r = client.get(p["video_url"], headers={"Range": "bytes=0-99"})
     assert r.status_code == 206 and len(r.content) == 100
 
-    with open(face_photo(tmp_path), "rb") as f:
-        r = client.post(f"/api/projects/{pid}/face", files={"photo": ("me.jpg", f, "image/jpeg")}, headers=H)
-    assert r.status_code == 200, r.text
-    assert r.json()["face"]["selected"] == 0  # the biggest face
+    # face library: the fake engine finds two faces in any photo, so one photo adds two faces
+    added = add_face(client, tmp_path)
+    assert [a["name"] for a in added] == ["Model A", "Model A 2"]
+    face_a, face_b = added[0]["id"], added[1]["id"]
+    assert client.get(added[0]["crop_url"]).status_code == 200
+    assert client.patch(f"/api/faces/{face_b}", json={"name": "Model B"}, headers=H).json()["name"] == "Model B"
+    assert client.get(f"/api/projects/{pid}").json()["default_face"] in (face_a, face_b)
 
-    r = client.get(f"/api/projects/{pid}/frames/10/faces")
-    faces = r.json()["faces"]
+    faces = client.get(f"/api/projects/{pid}/frames/10/faces").json()["faces"]
     assert len(faces) == 2
 
     # segments: times as text, overlap merge, savings stats
-    segs = [{"start": "0.4", "end": "0.8", "mode": "everyone"}, {"start": "#15", "end": "#25", "mode": "everyone"},
-            {"start": 40, "end": 50, "mode": "one"}]
+    segs = [{"start": "0.4", "end": "0.8", "mode": "everyone", "face": face_a},
+            {"start": "#15", "end": "#25", "mode": "everyone", "face": face_a},
+            {"start": 40, "end": 50, "mode": "cast"}]
     r = client.put(f"/api/projects/{pid}/segments", json={"segments": segs}, headers=H)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -90,27 +101,43 @@ def test_full_flow(client, small_video, tmp_path):
     assert body["stats"]["frames_to_process"] == 25
     assert body["segments"][0]["start_tc"] == "0:00.400"
 
-    # rendering is refused until the person for the "one" segment is picked
+    # rendering is refused until somebody is cast in the "picked people" segment
     r = client.post(f"/api/projects/{pid}/render", json={}, headers=H)
     assert r.status_code == 422 and "nobody is picked" in r.json()["detail"]
 
-    seg_id = body["segments"][1]["id"]
-    r = client.post(f"/api/projects/{pid}/references", json={"frame": 45, "bbox": faces[0]["bbox"],
-                                                              "segment_id": seg_id}, headers=H)
+    # casting board: drop face A on the left person and face B on the right person
+    left_box = max(faces, key=lambda f: f["bbox"][2] - f["bbox"][0])["bbox"]
+    right_box = min(faces, key=lambda f: f["bbox"][2] - f["bbox"][0])["bbox"]
+    r = client.post(f"/api/projects/{pid}/cast", json={"frame": 45, "bbox": left_box, "face": face_a}, headers=H)
     assert r.status_code == 200, r.text
-    ref = r.json()["ref"]
-    assert r.json()["project"]["segments"][1]["ref"] == ref
+    r = client.post(f"/api/projects/{pid}/cast", json={"frame": 45, "bbox": right_box, "face": face_b}, headers=H)
+    cast = r.json()["segments"][1]["cast"]
+    assert [c["face"] for c in cast] == [face_a, face_b]
+    # recasting the same person replaces their face instead of adding them twice
+    r = client.post(f"/api/projects/{pid}/cast", json={"frame": 46, "bbox": left_box, "face": face_b}, headers=H)
+    assert [c["face"] for c in r.json()["segments"][1]["cast"]] == [face_b, face_b]
+    labels = client.get(f"/api/projects/{pid}/frames/45/faces").json()
+    assert labels["mode"] == "cast" and {f["cast"] for f in labels["faces"]} == {face_b}
+
+    # casting outside a segment explains what to do
+    r = client.post(f"/api/projects/{pid}/cast", json={"frame": 70, "bbox": left_box, "face": face_a}, headers=H)
+    assert r.status_code == 409 and "segment" in r.json()["detail"]
 
     # overlapping segments with different modes are refused with a clear message
-    bad = body["segments"] + [{"start": 20, "end": 45, "mode": "main"}]
+    bad = client.get(f"/api/projects/{pid}").json()["segments"] + [{"start": 20, "end": 45, "mode": "main"}]
     r = client.put(f"/api/projects/{pid}/segments", json={"segments": bad}, headers=H)
     assert r.status_code == 422 and "overlap" in r.json()["detail"]
 
-    # preview a frame
-    r = client.post(f"/api/projects/{pid}/preview", json={"frame": 45, "mode": "one", "ref": ref}, headers=H)
+    # settings for the new swap options
+    r = client.patch(f"/api/projects/{pid}/settings", json={"enhance": 0.3, "occlusion": False, "det_size": 960},
+                     headers=H)
+    assert r.json()["settings"]["enhance"] == 0.3 and r.json()["settings"]["det_size"] == 960
+
+    # preview a frame inside the cast segment
+    r = client.post(f"/api/projects/{pid}/preview", json={"frame": 45}, headers=H)
     assert r.status_code == 200, r.text
     pv = r.json()
-    assert pv["faces"] == 2 and pv["swapped"] == 1 and pv["after"].startswith("data:image/jpeg;base64,")
+    assert pv["faces"] == 2 and pv["swapped"] == 2 and pv["after"].startswith("data:image/jpeg;base64,")
 
     # render the full video
     r = client.post(f"/api/projects/{pid}/render", json={"output": "full"}, headers=H)
@@ -126,16 +153,39 @@ def test_full_flow(client, small_video, tmp_path):
     r = client.get(f"/api/outputs/{name}")
     assert r.status_code == 200 and r.headers["content-type"] == "video/mp4"
     assert "attachment" in r.headers["content-disposition"]
+    assert client.get(f"/api/outputs/{name}/thumb.jpg").status_code == 200
 
     # clips only
     r = client.post(f"/api/projects/{pid}/render", json={"output": "clips"}, headers=H)
     job = wait_job(client, r.json()["job"]["id"])
     assert job["state"] == "done" and job["progress"]["frames_total"] == 25
 
+    # deleting a face that's cast blocks the next render with a clear message
+    client.delete(f"/api/faces/{face_b}", headers=H)
+    r = client.post(f"/api/projects/{pid}/render", json={}, headers=H)
+    assert r.status_code == 422 and "deleted" in r.json()["detail"]
+
     # project reloads with its settings
     p = client.get(f"/api/projects/{pid}").json()
     assert p["settings"]["output"] == "clips"
     assert [x["id"] for x in client.get("/api/projects").json()["projects"]] == [pid]
+    assert client.delete(f"/api/outputs/{name}", headers=H).status_code == 200
+
+
+def test_vr_project_gets_a_preview_copy(client, tmp_path):
+    from tests.test_vr import _vr_clip
+
+    clip = _vr_clip(tmp_path, "launch_180_LR.mp4")
+    with open(clip, "rb") as f:
+        p = client.post("/api/projects", files={"video": ("launch_180_LR.mp4", f, "video/mp4")}, headers=H).json()
+    assert p["settings"]["vr_format"] == "vr180_sbs"
+    assert any("VR 180" in n for n in p["notes"])
+    add_face(client, tmp_path)
+    client.put(f"/api/projects/{p['id']}/segments", json={"segments": [{"start": 2, "end": 6}]}, headers=H)
+    job = client.post(f"/api/projects/{p['id']}/render", json={}, headers=H).json()["job"]
+    job = wait_job(client, job["id"])
+    assert job["state"] == "done", job
+    assert job["result"]["output"].endswith("_180_LR.mp4")
 
 
 def test_no_face_in_photo(client, small_video, tmp_path):
@@ -148,7 +198,7 @@ def test_no_face_in_photo(client, small_video, tmp_path):
         with open(small_video, "rb") as f:
             pid = c.post("/api/projects", files={"video": ("a.mp4", f)}, headers=H).json()["id"]
         with open(face_photo(tmp_path), "rb") as f:
-            r = c.post(f"/api/projects/{pid}/face", files={"photo": ("me.jpg", f)}, headers=H)
+            r = c.post("/api/faces", files={"photo": ("me.jpg", f)}, headers=H)
         assert r.status_code == 422
         assert r.json()["detail"] == "No face found in your photo — use a clear, front-facing shot."
 
@@ -170,7 +220,7 @@ def test_cancel_render(tmp_path, small_video):
         with open(small_video, "rb") as f:
             pid = c.post("/api/projects", files={"video": ("a.mp4", f)}, headers=H).json()["id"]
         with open(face_photo(tmp_path), "rb") as f:
-            c.post(f"/api/projects/{pid}/face", files={"photo": ("me.jpg", f)}, headers=H)
+            c.post("/api/faces", files={"photo": ("me.jpg", f)}, headers=H)
         c.put(f"/api/projects/{pid}/segments", json={"segments": [{"start": 0, "end": 75}]}, headers=H)
         job = c.post(f"/api/projects/{pid}/render", json={}, headers=H).json()["job"]
         time.sleep(0.5)

@@ -4,129 +4,146 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FaceSwap Studio</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b5bd6'/%3E%3Ccircle cx='16' cy='14' r='7' fill='none' stroke='white' stroke-width='2.5'/%3E%3Cpath d='M8 27c2-4 5-6 8-6s6 2 8 6' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2324272B'/%3E%3Crect x='3' y='12' width='26' height='7' rx='1.5' fill='%23E23D7A' transform='rotate(-8 16 16)'/%3E%3Ccircle cx='16' cy='15.5' r='5.5' fill='%23F7F8F9'/%3E%3C/svg%3E">
+<link rel="preload" href="/static/fonts/schibsted-grotesk-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">FaceSwap Studio</div>
-  <span id="engine-status" class="pill">Starting…</span>
-  <div class="spacer"></div>
-  <label class="recent">Projects
-    <select id="recent-projects"><option value="">Recent projects…</option></select>
-  </label>
-  <button id="btn-new" class="ghost">New project</button>
+<header class="bar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#24272B"/><rect x="3" y="12" width="26" height="7" rx="1.5" fill="#E23D7A" transform="rotate(-8 16 16)"/><circle cx="16" cy="15.5" r="5.5" fill="#F7F8F9"/></svg>
+    <span>FaceSwap Studio</span>
+  </div>
+  <div class="project-picker">
+    <label class="visually-hidden" for="project-select">Open a project</label>
+    <select id="project-select"><option value="">Recent projects</option></select>
+    <button id="btn-new" class="quiet">New project</button>
+  </div>
+  <div class="engine" id="engine" role="status"><span class="dot"></span><span id="engine-text">Starting up</span></div>
 </header>
 
-<main>
-  <section class="card inputs">
-    <div class="drop" id="drop-video" tabindex="0">
-      <input type="file" id="file-video" accept="video/*,.mov,.mp4,.m4v,.mkv" hidden>
-      <div class="drop-title">1. Your ad video</div>
-      <div class="drop-body" id="video-summary">Drop a video here or <button class="link" data-pick="file-video">choose a file</button></div>
-    </div>
-    <div class="drop" id="drop-face" tabindex="0">
-      <input type="file" id="file-face" accept="image/*,.heic" hidden>
-      <div class="drop-title">2. The face to put in</div>
-      <div class="drop-body" id="face-summary">Drop a photo here or <button class="link" data-pick="file-face">choose a file</button></div>
-      <div id="face-pick" class="face-pick" hidden>
-        <div class="face-photo-wrap"><img id="face-photo" alt="Face photo"><div id="face-boxes"></div></div>
-        <div class="face-chosen"><img id="face-crop" alt="Chosen face"><span id="face-hint" class="muted"></span></div>
+<main class="studio">
+  <section class="stage" id="stage" aria-label="Video">
+    <div class="screen" id="screen">
+      <div class="stage-empty" id="stage-empty">
+        <input type="file" id="file-video" accept="video/*,.mov,.mp4,.m4v,.mkv" hidden>
+        <p class="stage-empty-title">Drop your ad video here</p>
+        <p>MP4 or MOV, straight off a phone or out of an editor. VR and 3D work too.</p>
+        <button class="light" data-pick="file-video">Choose a video</button>
       </div>
-    </div>
-  </section>
-
-  <section class="card" id="editor" hidden>
-    <div class="player">
-      <div class="video-wrap" id="video-wrap">
+      <div class="video-wrap" id="video-wrap" hidden>
         <video id="video" playsinline preload="auto"></video>
         <div id="overlay" class="overlay"></div>
-        <div id="pick-banner" class="pick-banner" hidden>Click the person to swap in this segment. Press Esc to cancel.</div>
+        <div id="stage-hint" class="stage-hint" hidden></div>
       </div>
     </div>
 
-    <div class="transport">
-      <button id="btn-play" title="Play / pause (Space)">Play</button>
-      <button id="btn-back" title="Back one frame (,)">‹ Frame</button>
-      <button id="btn-fwd" title="Forward one frame (.)">Frame ›</button>
-      <span id="timecode" class="timecode">0:00.000</span>
-      <div class="spacer"></div>
-      <button id="btn-in" title="Set the segment start (I)">Set in <kbd>I</kbd></button>
-      <button id="btn-out" title="Set the segment end (O)">Set out <kbd>O</kbd></button>
-      <label class="inline">New segments swap
-        <select id="default-mode">
-          <option value="one">One person</option>
-          <option value="everyone">Everyone</option>
-          <option value="main">Whoever's on screen</option>
-        </select>
-      </label>
-      <button id="btn-preview" class="primary-outline" title="Swap just this frame to check the result">Preview this frame</button>
-    </div>
-
-    <div id="timeline" class="timeline" title="Click or drag to move the playhead">
-      <div class="tl-track"></div>
-      <div id="tl-segs"></div>
-      <div id="tl-in" class="tl-in" hidden></div>
-      <div id="tl-playhead" class="tl-playhead"></div>
-    </div>
-    <div class="legend">
-      <span><i class="swatch mode-one"></i>One person</span>
-      <span><i class="swatch mode-everyone"></i>Everyone</span>
-      <span><i class="swatch mode-main"></i>Whoever's on screen</span>
-      <span id="in-hint" class="muted"></span>
-    </div>
-
-    <p id="savings" class="savings"></p>
-
-    <div class="table-wrap">
-      <table class="segments">
-        <thead><tr><th>#</th><th>Start</th><th>End</th><th>Length</th><th>Who gets swapped</th><th>Person</th><th></th></tr></thead>
-        <tbody id="segments"></tbody>
-      </table>
-    </div>
-    <p id="no-segments" class="muted">No segments yet. Pause where the swap should start and press <kbd>I</kbd>, then move to where it should end and press <kbd>O</kbd>.</p>
-  </section>
-
-  <section class="card" id="render-card" hidden>
-    <h2>3. Render</h2>
-    <div class="render-options">
-      <fieldset>
-        <legend>Output</legend>
-        <label><input type="radio" name="output" value="full" checked> Full video <span class="muted">(same length, only the segments swapped)</span></label>
-        <label><input type="radio" name="output" value="clips"> Clips only <span class="muted">(just the segments, joined)</span></label>
-      </fieldset>
-      <fieldset>
-        <legend>Quality and speed</legend>
-        <label><input type="checkbox" id="max-quality"> Max quality <span class="muted">(slower encode)</span></label>
-        <label>Face detection
-          <select id="det-size">
-            <option value="640">Standard (best for small faces)</option>
-            <option value="320">Fast (big, close-up faces)</option>
+    <div class="controls" id="controls" hidden>
+      <div class="transport">
+        <button id="btn-play" class="ghost-light play" aria-label="Play (Space)" title="Play / pause (Space)">
+          <svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>
+          <svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h3v11H4zM9 2.5h3v11H9z" fill="currentColor"/></svg>
+        </button>
+        <button id="btn-back" class="ghost-light" aria-label="Back one frame" title="Back one frame (,)">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>
+        </button>
+        <button id="btn-fwd" class="ghost-light" aria-label="Forward one frame" title="Forward one frame (.)">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>
+        </button>
+        <div class="timecode"><span id="tc-time">0:00.000</span><span id="tc-frame"></span></div>
+        <div class="spacer"></div>
+        <button id="btn-in" class="ghost-light" title="Start a segment here (I)">Mark in <kbd>I</kbd></button>
+        <button id="btn-out" class="ghost-light" title="End the segment here (O)">Mark out <kbd>O</kbd></button>
+        <label class="on-dark">New segments
+          <select id="default-mode" class="dark">
+            <option value="cast">Picked people</option>
+            <option value="everyone">Everyone</option>
+            <option value="main">Whoever's on screen</option>
           </select>
         </label>
-      </fieldset>
+      </div>
+      <div id="timeline" class="timeline" role="slider" aria-label="Playhead" tabindex="0" aria-valuemin="0">
+        <div class="tl-track"></div>
+        <div id="tl-segs"></div>
+        <div id="tl-in" class="tl-in" hidden></div>
+        <div id="tl-playhead" class="tl-playhead"></div>
+      </div>
+      <div class="stage-foot">
+        <span id="video-meta" class="on-dark-muted"></span>
+        <label class="on-dark">Video format <select id="vr-format" class="dark"></select></label>
+        <button id="btn-preview" class="light">Preview this frame</button>
+      </div>
     </div>
-    <div class="render-row">
-      <button id="btn-render" class="primary">Render</button>
-      <button id="btn-cancel" class="danger" hidden>Cancel</button>
-      <div class="progress" id="progress" hidden><div id="progress-bar"></div></div>
-    </div>
-    <p id="progress-text" class="muted"></p>
   </section>
 
-  <section class="card" id="outputs-card">
-    <h2>Finished videos</h2>
+  <aside class="board" id="board" aria-label="Faces">
+    <div class="board-head">
+      <h2>Faces</h2>
+      <input type="file" id="file-face" accept="image/*,.heic" multiple hidden>
+      <button class="quiet" data-pick="file-face">Add photos</button>
+    </div>
+    <p class="board-tip" id="board-tip">Drop in photos of the faces you want to use. Then drag a face onto a person in the video.</p>
+    <ul id="talent" class="talent"></ul>
+    <div class="board-drop" id="board-drop">Drop photos here</div>
+  </aside>
+
+  <section class="panel segments-panel" id="segments-panel" hidden aria-labelledby="seg-title">
+    <div class="panel-head">
+      <h2 id="seg-title">Segments</h2>
+      <p id="savings" class="savings"></p>
+    </div>
+    <ol id="segments" class="tapes"></ol>
+    <p id="no-segments" class="empty-note">Only the segments you mark get swapped. Pause where a swap should start and press <kbd>I</kbd>, then move to where it ends and press <kbd>O</kbd>.</p>
+  </section>
+
+  <section class="panel render-panel" id="render-panel" hidden aria-label="Render">
+    <div class="look">
+      <h2>Look</h2>
+      <label class="slider-row">
+        <span>Sharper faces</span>
+        <input type="range" id="opt-enhance" min="0" max="100" step="5" value="60">
+        <output id="opt-enhance-out">60%</output>
+      </label>
+      <label class="check"><input type="checkbox" id="opt-occlusion" checked> Keep hands and hair in front of the face</label>
+      <label class="check"><input type="checkbox" id="opt-color" checked> Match the scene's lighting</label>
+      <label class="check"><input type="checkbox" id="opt-steady" checked> Steady faces (less shimmer)</label>
+      <p id="look-note" class="fine" hidden></p>
+    </div>
+    <div class="output">
+      <h2>Output</h2>
+      <label class="radio"><input type="radio" name="output" value="full" checked> Full video, with only the segments swapped</label>
+      <label class="radio"><input type="radio" name="output" value="clips"> Just the segments, joined together</label>
+      <label class="check"><input type="checkbox" id="max-quality"> Max quality (slower to save)</label>
+      <label class="select-row">Face detection
+        <select id="det-size">
+          <option value="320">Fast, for big close-up faces</option>
+          <option value="640">Standard</option>
+          <option value="960">Thorough, for small or distant faces</option>
+        </select>
+      </label>
+    </div>
+    <div class="go">
+      <button id="btn-render" class="rec"><span class="rec-dot"></span>Render</button>
+      <button id="btn-cancel" class="quiet" hidden>Cancel</button>
+      <div class="progress" id="progress" hidden><div id="progress-bar"></div></div>
+      <p id="progress-text" class="progress-text"></p>
+    </div>
+  </section>
+
+  <section class="panel rendered" id="rendered" aria-labelledby="out-title">
+    <h2 id="out-title">Rendered videos</h2>
     <ul id="outputs" class="outputs"></ul>
-    <p id="no-outputs" class="muted">Renders you finish show up here.</p>
+    <p id="no-outputs" class="empty-note">Finished renders land here, ready to download.</p>
   </section>
 </main>
 
+<div id="picker" class="picker" role="dialog" aria-label="Choose a face" hidden></div>
+
 <dialog id="preview-dialog">
   <div class="dialog-head">
-    <strong>Preview</strong>
-    <span id="preview-info" class="muted"></span>
-    <div class="spacer"></div>
-    <button id="preview-close" class="ghost">Close</button>
+    <h2>Preview</h2>
+    <p id="preview-info" class="fine"></p>
+    <button id="preview-close" class="quiet">Close</button>
   </div>
   <div class="compare" id="compare">
     <img id="cmp-before" alt="Before">
@@ -134,10 +151,10 @@
     <div class="cmp-line" id="cmp-line"></div>
     <span class="cmp-label left">Before</span><span class="cmp-label right">After</span>
   </div>
-  <input type="range" id="cmp-slider" min="0" max="100" value="50" aria-label="Before and after">
+  <input type="range" id="cmp-slider" min="0" max="100" value="50" aria-label="Drag to compare before and after">
 </dialog>
 
-<div id="busy" class="busy" hidden><div class="spinner"></div><div id="busy-text">Working…</div></div>
+<div id="busy" class="busy" hidden><div class="spinner"></div><div id="busy-text">Working</div></div>
 <div id="toasts" class="toasts" aria-live="polite"></div>
 
 <script src="/static/app.js"></script>

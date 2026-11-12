@@ -2,7 +2,7 @@
 # One-time setup for FaceSwap Studio on a Mac (Apple Silicon, macOS 14 or newer).
 #   1. installs ffmpeg and Python 3.12 with Homebrew (if missing)
 #   2. creates the Python environment in .venv
-#   3. downloads the face models (~850 MB) and checks their SHA-256
+#   3. downloads the face models (~1.3 GB) and checks their SHA-256
 #   4. measures whether the Mac's GPU (CoreML) or CPU is faster, and saves the choice
 # Safe to run again: it skips whatever is already done.
 set -euo pipefail
@@ -14,6 +14,11 @@ BUFFALO_URL="https://github.com/deepinsight/insightface/releases/download/v0.7/b
 BUFFALO_SHA="80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f"
 DET_SHA="5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
 REC_SHA="4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
+# Sharper faces (GFPGAN 1.4) and hands-in-front (XSeg occlusion), ONNX versions from FaceFusion's assets
+GFPGAN_URL="https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/gfpgan_1.4.onnx"
+GFPGAN_SHA="accc4757b26bdb89b32b4d3500d4f79c9dff97c1dd7c7104bf9dcb95e3311385"
+XSEG_URL="https://github.com/facefusion/facefusion-assets/releases/download/models-3.1.0/xseg_1.onnx"
+XSEG_SHA="c4d1498b8a03b5fe2a3a5d2ef2a0402ab03bd51edaf5b2d8d5fb764702a97dd3"
 
 say() { printf "\n\033[1m%s\033[0m\n" "$*"; }
 fail() { printf "\n\033[31mSetup stopped: %s\033[0m\n" "$*" >&2; exit 1; }
@@ -48,7 +53,7 @@ say "2/4  Setting up the Python environment (.venv)…"
 .venv/bin/python -m pip install --quiet -r requirements.txt
 echo "  done"
 
-say "3/4  Downloading the face models (about 850 MB, only the first time)…"
+say "3/4  Downloading the face models (about 1.3 GB, only the first time)…"
 mkdir -p models
 fetch() {
   local url="$1" dest="$2" want="$3" got
@@ -77,6 +82,8 @@ if [ ! -f models/det_10g.onnx ] || [ "$(sha models/det_10g.onnx)" != "$DET_SHA" 
 else
   echo "  det_10g.onnx, w600k_r50.onnx: already downloaded"
 fi
+fetch "$GFPGAN_URL" models/gfpgan_1.4.onnx "$GFPGAN_SHA"
+fetch "$XSEG_URL" models/xseg_1.onnx "$XSEG_SHA"
 
 say "4/4  Measuring speed: Mac GPU (CoreML) vs CPU. The first CoreML run compiles the models and can take a minute…"
 if ! .venv/bin/python -m app.cli benchmark --runs 10; then

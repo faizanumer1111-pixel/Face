@@ -49,7 +49,9 @@ class FakeEngine:
     def latent(self, embedding):
         return embedding.reshape(1, -1)
 
-    def swap(self, img, face, latent):
+    features = {"enhance": False, "occlusion": False}
+
+    def swap(self, img, face, latent, opts=None):
         self.swap_calls += 1
         x1, y1, x2, y2 = [int(v) for v in face.bbox]
         img[y1:y2, x1:x2] = 255 - img[y1:y2, x1:x2]

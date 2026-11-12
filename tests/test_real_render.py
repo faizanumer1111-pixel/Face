@@ -104,17 +104,17 @@ def test_clips_only_duration(work, engine):
     src_emb = _source_embedding(engine)
     segs = [Segment(10, 30, "main"), Segment(60, 70, "main")]
     out = d / "clips.mp4"
-    stats = render(RenderRequest(path, info, src_emb, segs, {}, out, "clips", det_size=320), engine)
+    stats = render(RenderRequest(path, info, {"s": src_emb}, "s", segs, {}, out, "clips", det_size=320), engine)
     oinfo = probe(out)
     assert stats.frames_swapped == 30
     assert oinfo.total_frames == 30
     assert abs(oinfo.duration - 30 / float(info.fps)) < 0.06
 
 
-def _source_embedding(engine):
+def _source_embedding(engine, path=None):
     import cv2
 
-    img = cv2.imread(str(FACE))
+    img = cv2.imread(str(path or FACE))
     faces = engine.detect(img, 640)
     assert faces, "no face in samples/test_face"
     return engine.embed(img, max(faces, key=lambda f: f.area))
@@ -129,8 +129,9 @@ def test_one_person_swaps_only_them(work, engine):
     target, other = faces[0], faces[1]
     ref = engine.embed(frame, target)
     out = d / "one.mp4"
-    segs = [Segment(20, 32, "one", ref="r", threshold=0.35)]
-    stats = render(RenderRequest(path, info, _source_embedding(engine), segs, {"r": ref}, out, "full"), engine)
+    segs = [Segment(20, 32, "cast", cast=[{"ref": "r", "face": None}], threshold=0.35)]
+    stats = render(RenderRequest(path, info, {"s": _source_embedding(engine)}, "s", segs, {"r": ref}, out, "full"),
+                   engine)
     assert stats.faces_swapped == 12  # one face per frame
     oinfo = probe(out)
     src = frames_of(path, info, 20, 12)
@@ -147,10 +148,40 @@ def test_main_face_swaps_the_biggest(work, engine):
     if len(faces) < 2:
         pytest.skip("sample needs two people visible at frame 40")
     out = d / "main.mp4"
-    stats = render(RenderRequest(path, info, _source_embedding(engine), [Segment(40, 46, "main")], {}, out, "full"),
-                   engine)
+    stats = render(RenderRequest(path, info, {"s": _source_embedding(engine)}, "s", [Segment(40, 46, "main")], {}, out,
+                                 "full"), engine)
     assert stats.faces_swapped == 6
     a = read_frame(path, info, 40)
     b = read_frame(out, probe(out), 40)
     assert psnr(region(a, faces[0].bbox), region(b, faces[0].bbox)) < 30
     assert psnr(region(a, faces[1].bbox), region(b, faces[1].bbox)) > 38
+
+
+FACE2 = _find("test_face2", (".jpg", ".jpeg", ".png"))
+
+
+@pytest.mark.skipif(FACE2 is None, reason="needs a second face photo in samples/test_face2.jpg")
+def test_casting_gives_two_people_two_faces(work, engine):
+    d, path, info = work
+    frame = read_frame(path, info, 20)
+    people = sorted(engine.detect(frame, 640), key=lambda f: f.area, reverse=True)[:2]
+    if len(people) < 2:
+        pytest.skip("sample needs two people visible at frame 20")
+    refs = {"p0": engine.embed(frame, people[0]), "p1": engine.embed(frame, people[1])}
+    faces = {"one": _source_embedding(engine), "two": _source_embedding(engine, FACE2)}
+    seg = Segment(20, 26, "cast", cast=[{"ref": "p0", "face": "one"}, {"ref": "p1", "face": "two"}])
+    out = d / "cast.mp4"
+    stats = render(RenderRequest(path, info, faces, "one", [seg], refs, out, "full"), engine)
+    assert stats.faces_swapped == 12
+    result = read_frame(out, probe(out), 22)
+    found = engine.detect(result, 640)
+    for person, expect, other in ((people[0], "one", "two"), (people[1], "two", "one")):
+        f = max(found, key=lambda x: _overlap(x.bbox, person.bbox))
+        emb = engine.embed(result, f)
+        assert np.dot(emb, faces[expect]) > np.dot(emb, faces[other]), "wrong face on this person"
+
+
+def _overlap(a, b):
+    from app.targets import iou
+
+    return iou(a, b)

@@ -123,7 +123,7 @@ class ProjectStore:
                 "name": f.name,
                 "size_mb": round(f.stat().st_size / 1e6, 1),
                 "created": time.strftime("%Y-%m-%d %H:%M", time.localtime(f.stat().st_mtime)),
-                **{k: meta[k] for k in ("project_id", "mode", "frames_swapped", "seconds") if k in meta},
+                **{k: meta[k] for k in ("project_id", "mode", "frames_swapped", "seconds", "format") if k in meta},
             })
         return out
 
@@ -134,3 +134,62 @@ class ProjectStore:
         if not p.exists():
             raise KeyError(name)
         return p
+
+
+class FaceLibrary:
+    """Saved faces to put in, shared by every project: data/faces/<id>/."""
+
+    def __init__(self, data_dir: Path):
+        self.root = data_dir / "faces"
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def dir(self, fid: str) -> Path:
+        if not ID_RE.match(fid or ""):
+            raise KeyError(fid)
+        return self.root / fid
+
+    def add(self, name: str, crop_jpeg: bytes, embedding: np.ndarray) -> dict:
+        fid = uuid.uuid4().hex[:12]
+        d = self.root / fid
+        d.mkdir(parents=True)
+        (d / "crop.jpg").write_bytes(crop_jpeg)
+        np.save(d / "embedding.npy", embedding.astype(np.float32))
+        meta = {"id": fid, "name": name[:40] or "Face", "created": time.time()}
+        (d / "face.json").write_text(json.dumps(meta))
+        return meta
+
+    def get(self, fid: str) -> dict:
+        p = self.dir(fid) / "face.json"
+        if not p.exists():
+            raise KeyError(fid)
+        return json.loads(p.read_text())
+
+    def list(self) -> list[dict]:
+        out = []
+        for d in self.root.iterdir():
+            p = d / "face.json"
+            if p.exists():
+                try:
+                    out.append(json.loads(p.read_text()))
+                except ValueError:
+                    continue
+        return sorted(out, key=lambda m: m["created"], reverse=True)
+
+    def ids(self) -> set[str]:
+        return {m["id"] for m in self.list()}
+
+    def rename(self, fid: str, name: str) -> dict:
+        meta = self.get(fid)
+        meta["name"] = name.strip()[:40] or meta["name"]
+        (self.dir(fid) / "face.json").write_text(json.dumps(meta))
+        return meta
+
+    def delete(self, fid: str) -> None:
+        self.get(fid)
+        shutil.rmtree(self.dir(fid), ignore_errors=True)
+
+    def embedding(self, fid: str) -> np.ndarray:
+        return np.load(self.dir(fid) / "embedding.npy")
+
+    def crop(self, fid: str) -> Path:
+        return self.dir(fid) / "crop.jpg"

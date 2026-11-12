@@ -89,6 +89,10 @@ class VideoInfo:
     pix_fmt: str = ""
     matrix: str = "bt709"  # YCbCr matrix: "bt709" or "bt601"
     full_range: bool = False
+    vr_format: str = "flat"  # detected layout, see vr.FORMATS
+    vr_reason: str | None = None  # why we think it's VR/3D
+    vr_hint: bool = False  # big 2:1 or square frame: might be VR
+    has_proxy: bool = False  # a small browser copy exists (proxy.mp4)
 
     @property
     def fps(self) -> Fraction:
@@ -257,10 +261,10 @@ def prepare_source(src: Path, work: Path) -> tuple[VideoInfo, list[str]]:
 
     notes: list[str] = []
     reasons = []
-    if codec != "h264":
+    if codec not in ("h264", "hevc"):
         reasons.append("codec")
-        notes.append(f"Converted the {codec.upper() or 'video'} video to H.264 so it plays in the browser.")
-    if pix_fmt not in ("yuv420p", "yuvj420p") and not hdr:
+        notes.append(f"Converted the {codec.upper() or 'video'} video to H.264.")
+    if codec == "h264" and pix_fmt not in ("yuv420p", "yuvj420p") and not hdr:
         reasons.append("pix_fmt")
     if vfr:
         reasons.append("vfr")
@@ -276,9 +280,15 @@ def prepare_source(src: Path, work: Path) -> tuple[VideoInfo, list[str]]:
     if a is not None:
         audio_args = ["-c:a", "copy"] if a.get("codec_name") == "aac" else ["-c:a", "aac", "-b:a", "256k"]
 
+    from .vr import detect_format, looks_like_vr
+
+    vr_format, vr_reason = detect_format(v, src.name, width, height)
+    big = width * height > 4096 * 2304
+
     if not reasons:
+        tag = ["-tag:v", "hvc1"] if codec == "hevc" else []
         cmd = [ffmpeg_bin(), "-y", "-v", "error", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?",
-               "-c:v", "copy", *audio_args, "-movflags", "+faststart", "-map_metadata", "-1", str(work)]
+               "-c:v", "copy", *tag, *audio_args, "-movflags", "+faststart", "-map_metadata", "-1", str(work)]
         _run(cmd, "Couldn't prepare this video")
     else:
         if vfr:
@@ -303,14 +313,45 @@ def prepare_source(src: Path, work: Path) -> tuple[VideoInfo, list[str]]:
             notes.append(f"Converted variable frame rate to a constant {float(rate):.3g} fps so the audio stays in sync.")
         gop = max(1, int(round(float(rate))))
         matrix = "bt709" if hdr else _matrix(v)
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-g", str(gop), *color_tags(matrix),
-                *audio_args, "-movflags", "+faststart", "-map_metadata", "-1", str(work)]
+        if big:  # past H.264's comfortable size (8K VR): keep it HEVC
+            enc = ["-c:v", "libx265", "-preset", "fast", "-crf", "14", "-tag:v", "hvc1",
+                   "-x265-params", f"keyint={gop}:log-level=error"]
+        else:
+            enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-g", str(gop)]
+        cmd += [*enc, *color_tags(matrix), *audio_args, "-movflags", "+faststart", "-map_metadata", "-1", str(work)]
         _run(cmd, "Couldn't convert this video")
 
     info = probe(work)
     if info.total_frames <= 0:
         raise VideoError("This video doesn't have any frames.")
+    info.vr_format, info.vr_reason = vr_format, vr_reason
+    info.vr_hint = vr_format == "flat" and looks_like_vr(width, height)
+    if vr_format != "flat":
+        from .vr import FORMAT_LABELS
+
+        notes.append(f"Looks like {FORMAT_LABELS[vr_format]} (from {vr_reason}). You can change this under Video format.")
+    elif info.vr_hint:
+        notes.append("This might be VR footage. If it is, choose the right one under Video format.")
+    if info.codec != "h264" or info.width > 3840 or info.height > 2160:
+        make_proxy(work, work.with_name("proxy.mp4"), info)
+        info.has_proxy = True
     return info, notes
+
+
+def make_proxy(work: Path, proxy: Path, info: VideoInfo) -> None:
+    """A light H.264 copy for the browser: every frame kept (so frame numbers match), max 1920 px."""
+    scale = "scale='if(gt(iw,ih),min(1920,iw),-2)':'if(gt(iw,ih),-2,min(1920,ih))'"
+    gop = max(1, int(round(float(info.fps))))
+    base = ["-i", str(work), "-map", "0:v:0", "-map", "0:a:0?", "-vf", scale + ",format=yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-g", str(gop), *fps_mode_args("passthrough"),
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(proxy)]
+    if platform.system() == "Darwin":
+        # Hardware decoding makes 8K HEVC much faster to convert; fall back without it.
+        proc = subprocess.run([ffmpeg_bin(), "-y", "-v", "error", "-hwaccel", "videotoolbox", *base],
+                              capture_output=True, text=True)
+        if proc.returncode == 0:
+            return
+    _run([ffmpeg_bin(), "-y", "-v", "error", *base], "Couldn't make the preview copy")
 
 
 def _run(cmd: list[str], what: str) -> None:
@@ -422,6 +463,30 @@ def encoder_name(max_quality: bool) -> str:
     return "libx264"
 
 
+@functools.lru_cache(maxsize=1)
+def hevc_videotoolbox_available() -> bool:
+    if platform.system() != "Darwin":
+        return False
+    test = subprocess.run(
+        [ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30", "-frames:v", "10",
+         "-c:v", "hevc_videotoolbox", "-b:v", "2M", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    return test.returncode == 0
+
+
+def use_hevc(info: VideoInfo, vr: bool) -> bool:
+    return vr or info.width * info.height > 4096 * 2304
+
+
+def hevc_codec_args(info: VideoInfo, max_quality: bool) -> list[str]:
+    if not max_quality and hevc_videotoolbox_available():
+        bitrate = int(min(150e6, max(10e6, info.width * info.height * float(info.fps) * 0.06)))
+        return ["-c:v", "hevc_videotoolbox", "-b:v", str(bitrate), "-tag:v", "hvc1"]
+    preset, crf = ("slow", "18") if max_quality else ("fast", "20")
+    return ["-c:v", "libx265", "-preset", preset, "-crf", crf, "-tag:v", "hvc1", "-x265-params", "log-level=error"]
+
+
 def video_codec_args(info: VideoInfo, max_quality: bool) -> list[str]:
     if max_quality:
         return ["-c:v", "libx264", "-preset", "slow", "-crf", "16"]
@@ -439,7 +504,8 @@ class FrameWriter:
     ranges to cut and join (clips mode), or None.
     """
 
-    def __init__(self, out: Path, info: VideoInfo, source: Path, audio, max_quality: bool, log_path: Path):
+    def __init__(self, out: Path, info: VideoInfo, source: Path, audio, max_quality: bool, log_path: Path,
+                 vr: bool = False, index_at_end: bool = False):
         fps = info.fps
         cmd = [ffmpeg_bin(), "-y", "-v", "error", "-nostdin",
                "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{info.width}x{info.height}",
@@ -465,9 +531,10 @@ class FrameWriter:
             maps += ["-map", "[aout]"]
             audio_codec = ["-c:a", "aac", "-b:a", "256k"]
         cmd += maps + ["-vf", f"scale=out_color_matrix={info.matrix}:out_range=tv:flags={SWS_FLAGS},format=yuv420p"]
-        cmd += video_codec_args(info, max_quality) + [
-            "-pix_fmt", "yuv420p", *color_tags(info.matrix), *audio_codec, "-movflags", "+faststart",
-            "-f", "mp4", str(out)]
+        codec = hevc_codec_args(info, max_quality) if use_hevc(info, vr) else video_codec_args(info, max_quality)
+        # VR files keep the index at the end for now so the VR tags can be added afterwards.
+        flags = [] if (vr or index_at_end) else ["-movflags", "+faststart"]
+        cmd += codec + ["-pix_fmt", "yuv420p", *color_tags(info.matrix), *audio_codec, *flags, "-f", "mp4", str(out)]
         self.log_path = log_path
         self._log = open(log_path, "ab")
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self._log)
@@ -499,6 +566,19 @@ class FrameWriter:
         except (BrokenPipeError, OSError, ValueError):
             pass
         self._log.close()
+
+
+def finalize_vr(tmp: Path, out: Path, vr_format: str) -> None:
+    """Add the VR/3D tags so headsets and YouTube recognise the file, then move the index to the front."""
+    from .vr import inject_vr_tags
+
+    inject_vr_tags(tmp, vr_format)
+    proc = subprocess.run([ffmpeg_bin(), "-y", "-v", "error", "-i", str(tmp), "-map", "0", "-c", "copy",
+                           "-strict", "unofficial", "-movflags", "+faststart", str(out)], capture_output=True, text=True)
+    if proc.returncode != 0:
+        tmp.replace(out)  # still a valid video, just without the index moved
+    else:
+        tmp.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- #

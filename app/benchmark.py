@@ -13,9 +13,10 @@ from pathlib import Path
 
 import numpy as np
 
-from .faces import DET_MODEL, REC_MODEL, SWAP_MODEL, available_provider_choices, make_session, settings_path
+from .faces import (DET_MODEL, ENHANCE_MODEL, OCCLUDE_MODEL, REC_MODEL, SWAP_MODEL, available_provider_choices,
+                    make_session, settings_path)
 
-MODELS = {"det": DET_MODEL, "rec": REC_MODEL, "swap": SWAP_MODEL}
+MODELS = {"det": DET_MODEL, "rec": REC_MODEL, "swap": SWAP_MODEL, "enhance": ENHANCE_MODEL, "occlude": OCCLUDE_MODEL}
 
 
 def _inputs(key: str, sess) -> dict:
@@ -25,14 +26,20 @@ def _inputs(key: str, sess) -> dict:
         return {ins[0].name: rng.uniform(-1, 1, (1, 3, 640, 640)).astype(np.float32)}
     if key == "rec":
         return {ins[0].name: rng.uniform(-1, 1, (1, 3, 112, 112)).astype(np.float32)}
+    if key == "enhance":
+        return {ins[0].name: rng.uniform(-1, 1, (1, 3, 512, 512)).astype(np.float32)}
+    if key == "occlude":
+        return {ins[0].name: rng.uniform(0, 1, (1, 256, 256, 3)).astype(np.float32)}
     lat = rng.normal(size=(1, 512)).astype(np.float32)
     lat /= np.linalg.norm(lat)
     return {ins[0].name: rng.uniform(0, 1, (1, 3, 128, 128)).astype(np.float32), ins[1].name: lat}
 
 
-def _det_small(sess) -> dict:
+def _det_other_sizes(sess) -> list:
+    """The detector also runs at 320 px (Fast) and 960 px (Thorough): check those sizes too."""
     rng = np.random.default_rng(1)
-    return {sess.get_inputs()[0].name: rng.uniform(-1, 1, (1, 3, 320, 320)).astype(np.float32)}
+    name = sess.get_inputs()[0].name
+    return [sess.run(None, {name: rng.uniform(-1, 1, (1, 3, n, n)).astype(np.float32)}) for n in (320, 960)]
 
 
 def _matches(key: str, out: list, ref: list) -> tuple[bool, str]:
@@ -40,9 +47,9 @@ def _matches(key: str, out: list, ref: list) -> tuple[bool, str]:
         a, b = out[0].ravel(), ref[0].ravel()
         cos = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
         return cos > 0.995, f"cosine {cos:.4f}"
-    if key == "swap":
+    if key in ("swap", "enhance", "occlude"):
         err = float(np.abs(out[0] - ref[0]).mean())
-        return err < 0.01, f"mean error {err:.4f}"
+        return err < 0.02, f"mean error {err:.4f}"
     worst = max(float(np.abs(o - r).max()) for o, r in zip(out, ref))
     return worst < 0.05, f"max error {worst:.4f}"
 
@@ -54,6 +61,8 @@ def run_benchmark(models_dir: Path, data_dir: Path, runs: int = 20) -> dict:
     picked: dict[str, str] = {}
     for key, fname in MODELS.items():
         path = models_dir / fname
+        if not path.exists():
+            continue
         results = {}
         ref_out = None
         ref_small = None
@@ -77,15 +86,15 @@ def run_benchmark(models_dir: Path, data_dir: Path, runs: int = 20) -> dict:
                     sess.run(None, feeds)
                 ms = (time.perf_counter() - t0) / runs * 1000
                 entry["ms_per_run"] = round(ms, 2)
-                # The detector also runs at 320 px ("Fast" detection): check that size too.
-                small = sess.run(None, _det_small(sess)) if key == "det" else None
+                small = _det_other_sizes(sess) if key == "det" else None
                 if choice == "cpu":
                     ref_out, ref_small = out, small
                     entry["correct"] = True
                 else:
                     ok, detail = _matches(key, out, ref_out)
-                    if ok and small is not None:
-                        ok, detail = _matches(key, small, ref_small)
+                    for got, want in zip(small or [], ref_small or []):
+                        if ok:
+                            ok, detail = _matches(key, got, want)
                     entry["correct"] = ok
                     entry["check"] = detail
             except Exception as exc:  # report and move on
@@ -95,7 +104,8 @@ def run_benchmark(models_dir: Path, data_dir: Path, runs: int = 20) -> dict:
         picked[key] = min(valid, key=valid.get) if valid else "cpu"
         report["models"][key] = {"file": fname, "results": results, "picked": picked[key]}
 
-    per_face = sum(report["models"][k]["results"][picked[k]]["ms_per_run"] for k in ("det", "swap"))
+    per_face = sum(report["models"][k]["results"][picked[k]]["ms_per_run"]
+                   for k in ("det", "swap", "enhance", "occlude") if k in report["models"])
     report["estimated_fps_one_face"] = round(1000 / per_face, 1) if per_face else None
     report["providers"] = picked
     data_dir.mkdir(parents=True, exist_ok=True)

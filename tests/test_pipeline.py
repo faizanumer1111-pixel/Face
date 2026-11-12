@@ -34,9 +34,10 @@ def boxes(shape):
 
 def test_full_render_swaps_only_inside_segments(work, tmp_path, fake_engine):
     path, info = work
-    segs = [Segment(10, 20, "everyone"), Segment(40, 50, "main"), Segment(60, 65, "one", ref="me")]
+    segs = [Segment(10, 20, "everyone"), Segment(40, 50, "main"),
+            Segment(60, 65, "cast", cast=[{"ref": "me", "face": None}])]
     out = tmp_path / "out.mp4"
-    req = RenderRequest(path, info, LEFT_ID, segs, {"me": LEFT_ID}, out, "full")
+    req = RenderRequest(path, info, {"f": LEFT_ID}, "f", segs, {"me": LEFT_ID}, out, "full")
     stats = render(req, fake_engine)
 
     # only segment frames went to the face models
@@ -64,7 +65,7 @@ def test_clips_render_is_just_the_segments(work, tmp_path, fake_engine):
     path, info = work
     segs = [Segment(10, 20, "everyone"), Segment(50, 62, "everyone")]
     out = tmp_path / "clips.mp4"
-    render(RenderRequest(path, info, LEFT_ID, segs, {}, out, "clips"), fake_engine)
+    render(RenderRequest(path, info, {"f": LEFT_ID}, "f", segs, {}, out, "clips"), fake_engine)
     oinfo = probe(out)
     assert oinfo.total_frames == 22
     assert abs(oinfo.duration - 22 / 25) < 0.05
@@ -96,7 +97,7 @@ def test_cancel_leaves_no_file(work, tmp_path, fake_engine):
 
     fake_engine.detect = slow_detect
     with pytest.raises(Cancelled):
-        render(RenderRequest(path, info, LEFT_ID, [Segment(0, 75, "everyone")], {}, out, "full"), fake_engine,
+        render(RenderRequest(path, info, {"f": LEFT_ID}, "f", [Segment(0, 75, "everyone")], {}, out, "full"), fake_engine,
                cancel=cancel)
     assert not out.exists()
     assert not list(tmp_path.glob("*.partial.mp4"))
