@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FaceSwap Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b5bd6'/%3E%3Ccircle cx='16' cy='14' r='7' fill='none' stroke='white' stroke-width='2.5'/%3E%3Cpath d='M8 27c2-4 5-6 8-6s6 2 8 6' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">FaceSwap Studio</div>
+  <span id="engine-status" class="pill">Starting…</span>
+  <div class="spacer"></div>
+  <label class="recent">Projects
+    <select id="recent-projects"><option value="">Recent projects…</option></select>
+  </label>
+  <button id="btn-new" class="ghost">New project</button>
+</header>
+
+<main>
+  <section class="card inputs">
+    <div class="drop" id="drop-video" tabindex="0">
+      <input type="file" id="file-video" accept="video/*,.mov,.mp4,.m4v,.mkv" hidden>
+      <div class="drop-title">1. Your ad video</div>
+      <div class="drop-body" id="video-summary">Drop a video here or <button class="link" data-pick="file-video">choose a file</button></div>
+    </div>
+    <div class="drop" id="drop-face" tabindex="0">
+      <input type="file" id="file-face" accept="image/*,.heic" hidden>
+      <div class="drop-title">2. The face to put in</div>
+      <div class="drop-body" id="face-summary">Drop a photo here or <button class="link" data-pick="file-face">choose a file</button></div>
+      <div id="face-pick" class="face-pick" hidden>
+        <div class="face-photo-wrap"><img id="face-photo" alt="Face photo"><div id="face-boxes"></div></div>
+        <div class="face-chosen"><img id="face-crop" alt="Chosen face"><span id="face-hint" class="muted"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="editor" hidden>
+    <div class="player">
+      <div class="video-wrap" id="video-wrap">
+        <video id="video" playsinline preload="auto"></video>
+        <div id="overlay" class="overlay"></div>
+        <div id="pick-banner" class="pick-banner" hidden>Click the person to swap in this segment. Press Esc to cancel.</div>
+      </div>
+    </div>
+
+    <div class="transport">
+      <button id="btn-play" title="Play / pause (Space)">Play</button>
+      <button id="btn-back" title="Back one frame (,)">‹ Frame</button>
+      <button id="btn-fwd" title="Forward one frame (.)">Frame ›</button>
+      <span id="timecode" class="timecode">0:00.000</span>
+      <div class="spacer"></div>
+      <button id="btn-in" title="Set the segment start (I)">Set in <kbd>I</kbd></button>
+      <button id="btn-out" title="Set the segment end (O)">Set out <kbd>O</kbd></button>
+      <label class="inline">New segments swap
+        <select id="default-mode">
+          <option value="one">One person</option>
+          <option value="everyone">Everyone</option>
+          <option value="main">Whoever's on screen</option>
+        </select>
+      </label>
+      <button id="btn-preview" class="primary-outline" title="Swap just this frame to check the result">Preview this frame</button>
+    </div>
+
+    <div id="timeline" class="timeline" title="Click or drag to move the playhead">
+      <div class="tl-track"></div>
+      <div id="tl-segs"></div>
+      <div id="tl-in" class="tl-in" hidden></div>
+      <div id="tl-playhead" class="tl-playhead"></div>
+    </div>
+    <div class="legend">
+      <span><i class="swatch mode-one"></i>One person</span>
+      <span><i class="swatch mode-everyone"></i>Everyone</span>
+      <span><i class="swatch mode-main"></i>Whoever's on screen</span>
+      <span id="in-hint" class="muted"></span>
+    </div>
+
+    <p id="savings" class="savings"></p>
+
+    <div class="table-wrap">
+      <table class="segments">
+        <thead><tr><th>#</th><th>Start</th><th>End</th><th>Length</th><th>Who gets swapped</th><th>Person</th><th></th></tr></thead>
+        <tbody id="segments"></tbody>
+      </table>
+    </div>
+    <p id="no-segments" class="muted">No segments yet. Pause where the swap should start and press <kbd>I</kbd>, then move to where it should end and press <kbd>O</kbd>.</p>
+  </section>
+
+  <section class="card" id="render-card" hidden>
+    <h2>3. Render</h2>
+    <div class="render-options">
+      <fieldset>
+        <legend>Output</legend>
+        <label><input type="radio" name="output" value="full" checked> Full video <span class="muted">(same length, only the segments swapped)</span></label>
+        <label><input type="radio" name="output" value="clips"> Clips only <span class="muted">(just the segments, joined)</span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Quality and speed</legend>
+        <label><input type="checkbox" id="max-quality"> Max quality <span class="muted">(slower encode)</span></label>
+        <label>Face detection
+          <select id="det-size">
+            <option value="640">Standard (best for small faces)</option>
+            <option value="320">Fast (big, close-up faces)</option>
+          </select>
+        </label>
+      </fieldset>
+    </div>
+    <div class="render-row">
+      <button id="btn-render" class="primary">Render</button>
+      <button id="btn-cancel" class="danger" hidden>Cancel</button>
+      <div class="progress" id="progress" hidden><div id="progress-bar"></div></div>
+    </div>
+    <p id="progress-text" class="muted"></p>
+  </section>
+
+  <section class="card" id="outputs-card">
+    <h2>Finished videos</h2>
+    <ul id="outputs" class="outputs"></ul>
+    <p id="no-outputs" class="muted">Renders you finish show up here.</p>
+  </section>
+</main>
+
+<dialog id="preview-dialog">
+  <div class="dialog-head">
+    <strong>Preview</strong>
+    <span id="preview-info" class="muted"></span>
+    <div class="spacer"></div>
+    <button id="preview-close" class="ghost">Close</button>
+  </div>
+  <div class="compare" id="compare">
+    <img id="cmp-before" alt="Before">
+    <img id="cmp-after" alt="After">
+    <div class="cmp-line" id="cmp-line"></div>
+    <span class="cmp-label left">Before</span><span class="cmp-label right">After</span>
+  </div>
+  <input type="range" id="cmp-slider" min="0" max="100" value="50" aria-label="Before and after">
+</dialog>
+
+<div id="busy" class="busy" hidden><div class="spinner"></div><div id="busy-text">Working…</div></div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

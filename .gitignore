@@ -1,0 +1,10 @@
+.venv/
+data/
+models/
+samples/*
+!samples/README.md
+tests/artifacts/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
