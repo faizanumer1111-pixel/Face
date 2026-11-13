@@ -135,6 +135,7 @@ input[type="range"] { accent-color: var(--ink); }
     "stage board"
     "segments segments"
     "render render"
+    "queue queue"
     "rendered rendered";
   gap: 16px;
   padding: 16px 20px 48px;
@@ -142,7 +143,7 @@ input[type="range"] { accent-color: var(--ink); }
   margin: 0 auto;
 }
 @media (max-width: 980px) {
-  .studio { grid-template-columns: minmax(0, 1fr); grid-template-areas: "stage" "board" "segments" "render" "rendered"; padding: 12px 16px 40px; }
+  .studio { grid-template-columns: minmax(0, 1fr); grid-template-areas: "stage" "board" "segments" "render" "queue" "rendered"; padding: 12px 16px 40px; }
   .bar { flex-wrap: wrap; padding: 10px 16px; gap: 10px 16px; }
   .project-picker { order: 3; flex-basis: 100%; }
   .project-picker select { flex: 1; min-width: 0; max-width: none; }
@@ -446,6 +447,43 @@ button.rec {
 .progress { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
 #progress-bar { height: 100%; width: 0; background: var(--rec); transition: width .3s; }
 .progress-text { font-size: 14px; color: var(--ink-2); }
+
+/* render queue */
+.queue-panel { grid-area: queue; }
+.queue { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.job {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m);
+  background: var(--board);
+}
+.job.running { border-color: var(--ink); }
+.job.finished { opacity: .75; }
+.job-pos { font-weight: 800; font-size: 18px; text-align: center; color: var(--ink-2); }
+.job.running .job-pos { color: var(--rec); }
+.job-title { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-title button { border: 0; padding: 0; background: none; font: inherit; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
+.job-sub { grid-column: 2; font-size: 13px; color: var(--ink-2); }
+.job-actions { grid-row: 1 / span 2; grid-column: 3; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.job-actions button { padding: 4px 10px; font-size: 13px; }
+.job .progress { grid-column: 2 / 4; }
+.job.failed .job-sub { color: var(--rec); }
+@media (max-width: 760px) { .job { grid-template-columns: 28px minmax(0, 1fr); } .job-actions { grid-column: 2; grid-row: auto; justify-content: flex-start; } .job .progress { grid-column: 2; } }
+.queue-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  border-radius: 999px;
+  padding: 4px 12px;
+  background: var(--paper);
+}
+.queue-chip .rec-dot { width: 9px; height: 9px; box-shadow: none; animation: rec 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .queue-chip .rec-dot { animation: none; } }
 
 /* rendered videos */
 .outputs { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }

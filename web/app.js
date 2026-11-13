@@ -12,7 +12,8 @@ const S = {
   fps: 30,
   total: 0,
   pendingIn: null,
-  job: null,
+  jobs: [], // the render queue, newest finished last
+  seenFinished: null, // ids of finished renders already announced
   pollTimer: null,
   boxesTimer: null,
   boxesFor: null, // frame the face boxes belong to
@@ -294,7 +295,7 @@ async function openProject(id) {
   await guarded(async () => {
     setProject(await api(`/api/projects/${id}`));
     await loadRecent();
-    await resumeJob();
+    showJob();
   });
 }
 
@@ -309,10 +310,6 @@ function newProject() {
 
 async function uploadVideo(file) {
   if (!file) return;
-  if (S.job && ["queued", "running"].includes(S.job.state)) {
-    toast("A render is running. Wait for it or cancel it first.", true);
-    return;
-  }
   busy("Bringing in your video");
   await guarded(async () => {
     const form = new FormData();
@@ -445,11 +442,13 @@ function renderTimeline() {
 
 function updateRenderButton() {
   const p = S.project;
-  const running = S.job && ["queued", "running"].includes(S.job.state);
+  const busyQueue = S.jobs.some((j) => ACTIVE.includes(j.state));
   const ready = p && S.faces.length && (p.segments || []).length;
-  $("btn-render").disabled = !ready || running;
+  $("btn-render").disabled = !ready;
+  $("btn-render").lastChild.textContent = busyQueue ? "Add to queue" : "Render";
   $("btn-render").title = !p ? "" : !S.faces.length ? "Add a face first" : !(p.segments || []).length ? "Mark at least one segment" : "";
-  $("btn-render").parentElement.classList.toggle("recording", !!running);
+  const mine = projectJob();
+  $("btn-render").parentElement.classList.toggle("recording", !!mine && mine.state === "running");
 }
 
 // ------------------------------------------------------------------ player
@@ -701,72 +700,145 @@ function setSlider(v) {
 
 // ------------------------------------------------------------------ render
 
+const ACTIVE = ["queued", "running"];
+
 async function startRender() {
   await guarded(async () => {
     const { job } = await api(`/api/projects/${S.project.id}/render`, {
       method: "POST",
       json: { output: document.querySelector("input[name=output]:checked").value, max_quality: $("max-quality").checked, det_size: Number($("det-size").value) },
     });
-    S.job = job;
-    showJob();
-    pollJob();
+    toast(job.position > 1 ? `Added to the queue. It's number ${job.position}.` : "Rendering started.");
+    await refreshJobs();
   });
 }
 
-async function cancelRender() {
-  if (!S.job) return;
+async function cancelJob(id) {
   await guarded(async () => {
-    S.job = await api(`/api/jobs/${S.job.id}/cancel`, { method: "POST" });
-    showJob();
+    await api(`/api/jobs/${id}/cancel`, { method: "POST" });
+    await refreshJobs();
   });
 }
 
-function pollJob() {
+async function moveJob(id, to) {
+  await guarded(async () => {
+    ({ jobs: S.jobs } = await api(`/api/jobs/${id}/move`, { method: "POST", json: { to } }));
+    renderQueue();
+  });
+}
+
+function projectJob() {
+  // This project's render to show in the Render panel: running, else next waiting, else latest finished.
+  if (!S.project) return null;
+  const mine = S.jobs.filter((j) => j.project_id === S.project.id);
+  return mine.find((j) => j.state === "running") || mine.find((j) => j.state === "queued") || mine[0] || null;
+}
+
+async function refreshJobs() {
   clearTimeout(S.pollTimer);
-  if (!S.job) return;
-  S.pollTimer = setTimeout(async () => {
-    try { S.job = await api(`/api/jobs/${S.job.id}`); } catch { S.job = null; }
-    showJob();
-    if (S.job && ["queued", "running"].includes(S.job.state)) pollJob();
-    else if (S.job && S.job.state === "done") { toast("Render finished. It's in Rendered videos."); loadOutputs(); }
-  }, 700);
+  try {
+    ({ jobs: S.jobs } = await api("/api/jobs"));
+  } catch {
+    S.pollTimer = setTimeout(refreshJobs, 3000);
+    return;
+  }
+  const finished = S.jobs.filter((j) => !ACTIVE.includes(j.state));
+  if (S.seenFinished === null) {
+    S.seenFinished = new Set(finished.map((j) => j.id)); // don't announce old ones on page load
+  } else {
+    let newDone = false;
+    for (const j of finished) {
+      if (S.seenFinished.has(j.id)) continue;
+      S.seenFinished.add(j.id);
+      if (j.state === "done") { toast(`Finished: ${j.label}. It's in Rendered videos.`); newDone = true; }
+      if (j.state === "failed") toast(`Render failed: ${j.label}. ${j.message}`, true);
+    }
+    if (newDone) loadOutputs();
+  }
+  renderQueue();
+  showJob();
+  if (S.jobs.some((j) => ACTIVE.includes(j.state))) S.pollTimer = setTimeout(refreshJobs, 800);
+}
+
+function jobProgressText(j) {
+  const p = j.progress || {};
+  if (j.state === "queued") return "Waiting";
+  if (j.state === "running") {
+    if (!p.frames_total) return "Starting";
+    if (p.frames_swapped < p.swap_total) {
+      let t = `Swapping frame ${p.frames_swapped.toLocaleString()} of ${p.swap_total.toLocaleString()}`;
+      if (p.swap_fps) t += ` at ${p.swap_fps.toFixed(1)} frames a second`;
+      if (p.eta_seconds != null && p.frames_swapped > 0) t += `. About ${fmtDuration(p.eta_seconds)} left.`;
+      return t;
+    }
+    return "Saving the video";
+  }
+  if (j.state === "done") {
+    let t = `Done in ${fmtDuration((j.result || {}).seconds)}.`;
+    if (p.frames_without_target) t += ` ${p.frames_without_target} segment frame(s) had nobody to swap.`;
+    return t;
+  }
+  if (j.state === "cancelled") return "Cancelled.";
+  return `Failed: ${j.message}`;
 }
 
 function showJob() {
-  const j = S.job;
-  const running = j && ["queued", "running"].includes(j.state);
+  const j = projectJob();
+  const running = j && ACTIVE.includes(j.state);
   $("btn-cancel").hidden = !running;
-  $("progress").hidden = !j;
+  $("btn-cancel").textContent = j && j.state === "queued" ? "Take out of queue" : "Cancel";
+  $("progress").hidden = !j || j.state !== "running";
   updateRenderButton();
   if (!j) { $("progress-text").textContent = ""; return; }
   const p = j.progress || {};
-  const pct = p.frames_total ? (100 * p.frames_written) / p.frames_total : 0;
-  $("progress-bar").style.width = `${j.state === "done" ? 100 : pct}%`;
-  let text = "";
-  if (j.state === "queued") text = "Waiting to start";
-  else if (j.state === "running") {
-    if (!p.frames_total) text = "Starting";
-    else if (p.frames_swapped < p.swap_total) {
-      text = `Swapping frame ${p.frames_swapped.toLocaleString()} of ${p.swap_total.toLocaleString()}`;
-      if (p.swap_fps) text += ` at ${p.swap_fps.toFixed(1)} frames a second`;
-      if (p.eta_seconds != null && p.frames_swapped > 0) text += `. About ${fmtDuration(p.eta_seconds)} left.`;
-    } else text = "Saving the video";
-  } else if (j.state === "done") {
-    const r = j.result || {};
-    text = `Done in ${fmtDuration(r.seconds)}.`;
-    if (p.frames_without_target) text += ` ${p.frames_without_target} segment frame(s) had nobody to swap.`;
-  } else if (j.state === "cancelled") text = "Render cancelled.";
-  else if (j.state === "failed") text = `Render failed: ${j.message}`;
+  $("progress-bar").style.width = `${p.frames_total ? (100 * p.frames_written) / p.frames_total : 0}%`;
+  let text = jobProgressText(j);
+  if (j.state === "queued") text = `Waiting in the queue, number ${j.position}.`;
   $("progress-text").textContent = text;
 }
 
-async function resumeJob() {
-  try {
-    const { jobs } = await api("/api/jobs");
-    const j = S.project && jobs.find((x) => x.project_id === S.project.id);
-    if (j) { S.job = j; showJob(); pollJob(); }
-    else if (S.job && S.job.project_id !== (S.project && S.project.id)) { S.job = null; showJob(); }
-  } catch {}
+function renderQueue() {
+  const jobs = S.jobs;
+  $("queue-panel").hidden = !jobs.length;
+  $("btn-clear-jobs").hidden = !jobs.some((j) => !ACTIVE.includes(j.state));
+  const active = jobs.filter((j) => ACTIVE.includes(j.state));
+  const running = active.filter((j) => j.state === "running").length;
+  const waitingList = active.filter((j) => j.state === "queued");
+  const chip = $("queue-chip");
+  chip.hidden = !active.length;
+  $("queue-chip-text").textContent = running
+    ? (waitingList.length ? `Rendering, ${waitingList.length} waiting` : "Rendering")
+    : `${waitingList.length} waiting`;
+
+  const ol = $("queue");
+  ol.innerHTML = "";
+  for (const j of jobs) {
+    const d = j.details || {};
+    const isActive = ACTIVE.includes(j.state);
+    const sub = [d.output === "clips" ? "Just the segments" : "Full video",
+      d.frames != null ? `${Number(d.frames).toLocaleString()} frames to swap` : null,
+      d.format && d.format !== "flat" && S.status && S.status.formats ? S.status.formats[d.format] : null].filter(Boolean).join(", ");
+    const li = el("li", { class: `job ${j.state}${isActive ? "" : " finished"}` },
+      el("div", { class: "job-pos", text: isActive ? String(j.position) : j.state === "done" ? "✓" : "–", "aria-hidden": "true" }),
+      el("div", { class: "job-title" },
+        el("button", { text: j.label || d.project || "Render", title: "Open this project", onclick: () => openProject(j.project_id) })),
+      el("div", { class: "job-sub", text: isActive && j.state === "queued" ? `${sub}. Waiting.` : jobProgressText(j) + (isActive ? "" : ` ${sub}.`) }),
+      el("div", { class: "job-actions" }));
+    const actions = li.querySelector(".job-actions");
+    if (j.state === "queued") {
+      const rank = waitingList.findIndex((w) => w.id === j.id) + 1;
+      actions.append(
+        el("button", { text: "Up", "aria-label": `Move ${j.label} up`, disabled: rank === 1, onclick: () => moveJob(j.id, rank - 1) }),
+        el("button", { text: "Down", "aria-label": `Move ${j.label} down`, disabled: rank === waitingList.length, onclick: () => moveJob(j.id, rank + 1) }),
+        el("button", { class: "quiet", text: "Remove", onclick: () => cancelJob(j.id) }));
+    } else if (j.state === "running") {
+      actions.append(el("button", { class: "quiet", text: "Cancel", onclick: () => cancelJob(j.id) }));
+      const p = j.progress || {};
+      const bar = el("div", { class: "progress" }, el("div", { style: `height:100%;background:var(--rec);width:${p.frames_total ? (100 * p.frames_written) / p.frames_total : 0}%` }));
+      li.append(bar);
+    }
+    ol.append(li);
+  }
 }
 
 // ----------------------------------------------------------------- outputs
@@ -787,7 +859,7 @@ async function loadOutputs() {
       el("img", { src: `/api/outputs/${name}/thumb.jpg`, alt: "", loading: "lazy" }),
       el("div", { class: "out-body" },
         el("span", { class: "out-name", text: o.name }),
-        el("span", { class: "out-meta", text: `${kind}${fmt}. ${o.size_mb} MB, ${o.created}` })),
+        el("span", { class: "out-meta", text: `${kind}${fmt}${o.faces && o.faces.length ? `, with ${o.faces.join(", ")}` : ""}. ${o.size_mb} MB, ${o.created}` })),
       el("div", { class: "out-actions" },
         el("a", { class: "button", href: `/api/outputs/${name}`, download: o.name, text: "Download" }),
         mac ? el("button", { text: "Reveal in Finder", onclick: () => guarded(() => api(`/api/outputs/${name}/reveal`, { method: "POST" })) }) : null,
@@ -901,7 +973,9 @@ function wire() {
   });
 
   $("btn-render").addEventListener("click", startRender);
-  $("btn-cancel").addEventListener("click", cancelRender);
+  $("btn-cancel").addEventListener("click", () => { const j = projectJob(); if (j) cancelJob(j.id); });
+  $("btn-clear-jobs").addEventListener("click", () => guarded(async () => { ({ jobs: S.jobs } = await api("/api/jobs/clear", { method: "POST" })); renderQueue(); }));
+  $("queue-chip").addEventListener("click", () => $("queue-panel").scrollIntoView({ behavior: "smooth", block: "start" }));
   for (const r of document.querySelectorAll("input[name=output]")) r.addEventListener("change", () => patchSettings({ output: r.value }));
   $("max-quality").addEventListener("change", (e) => patchSettings({ max_quality: e.target.checked }));
   $("det-size").addEventListener("change", (e) => patchSettings({ det_size: Number(e.target.value) }).then(() => scheduleBoxes(true)));
@@ -946,16 +1020,14 @@ async function init() {
     try {
       setProject(await api(`/api/projects/${last}`));
       await loadRecent();
-      await resumeJob();
     } catch {
       renderAll();
     }
   } else renderAll();
+  await refreshJobs();
   if (!S.project) {
-    try {
-      const { jobs } = await api("/api/jobs");
-      if (jobs.length) await openProject(jobs[0].project_id);
-    } catch {}
+    const j = S.jobs.find((x) => ACTIVE.includes(x.state));
+    if (j) await openProject(j.project_id);
   }
 }
 

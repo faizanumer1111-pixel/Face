@@ -520,6 +520,11 @@ def create_app(data_dir: Path = config.DATA_DIR, models_dir: Path = config.MODEL
     # -------------------------------------------------------------- render
     @app.post("/api/projects/{pid}/render")
     def start_render(pid: str, body: dict = Body(default={})):
+        """Add a render to the queue.
+
+        Everything the render needs is copied now (segments, settings, the faces), so
+        you can keep editing the project, or queue it again with other faces, while it waits.
+        """
         project = store.get(pid)
         info = info_of(project)
         segs = segments_of(project, info)
@@ -534,23 +539,37 @@ def create_app(data_dir: Path = config.DATA_DIR, models_dir: Path = config.MODEL
         if "det_size" in body and int(body["det_size"]) in DET_SIZES:
             s["det_size"] = int(body["det_size"])
         store.save(project)
-        if any(j.project_id == pid for j in jobs.active()):
-            raise HTTPException(409, "This project is already rendering.")
-        job = jobs.submit(pid, lambda job: _run_render(job, pid))
-        return {"job": job.to_json()}
 
-    def _run_render(job: Job, pid: str) -> dict:
-        project = store.get(pid)
-        info = info_of(project)
-        segs = segments_of(project, info)
-        s = settings_of(project)
-        out = store.output_path(project, s["output"])
+        settings = settings_of(project)
+        faces = _faces_for(project, segs)
+        refs = _refs_for(project, segs)
+        default = default_face(project)
+        used = []
+        for sg in segs:
+            ids = [c.get("face") or default for c in sg.cast] if sg.mode == "cast" else [sg.face or default]
+            used += [i for i in ids if i and i not in used]
+        names = list(dict.fromkeys(library.get(i)["name"] for i in used if i in library.ids()))
+        snapshot = {
+            "name": project["name"], "info": info, "segments": segs, "settings": settings, "faces": faces,
+            "refs": refs, "default_face": default, "work": work_path(project),
+        }
+        details = {
+            "project": project["name"], "faces": names, "output": output, "segments": len(segs),
+            "frames": stats(segs, info.total_frames)["frames_to_process"], "format": settings["vr_format"],
+        }
+        label = project["name"] + (f" with {', '.join(names)}" if names else "")
+        job = jobs.submit(pid, lambda job: _run_render(job, pid, snapshot), label=label, details=details)
+        return {"job": job.to_json(jobs.position(job))}
+
+    def _run_render(job: Job, pid: str, snap: dict) -> dict:
+        s = snap["settings"]
+        out = store.output_path({"name": snap["name"]}, s["output"])
         tag = FILENAME_TAGS.get(s["vr_format"])
         if tag and not out.stem.lower().endswith(tag.lower()):
             out = out.with_name(out.stem + tag + ".mp4")
         engine = engines.get()
-        req = RenderRequest(video_path=work_path(project), info=info, faces=_faces_for(project, segs),
-                            default_face=default_face(project), segments=segs, references=_refs_for(project, segs),
+        req = RenderRequest(video_path=snap["work"], info=snap["info"], faces=snap["faces"],
+                            default_face=snap["default_face"], segments=snap["segments"], references=snap["refs"],
                             output_path=out, output_mode=s["output"], det_size=int(s["det_size"]),
                             max_quality=bool(s["max_quality"]), options=SwapOptions.from_json(s),
                             steady=bool(s["steady"]), vr_format=s["vr_format"])
@@ -559,25 +578,41 @@ def create_app(data_dir: Path = config.DATA_DIR, models_dir: Path = config.MODEL
             job.progress = st.to_json()
 
         t0 = time.time()
-        result = render(req, engine, on_progress=progress, cancel=job.cancel,
-                        log_path=store.dir(pid) / "last_render.log")
+        log_dir = store.dir(pid) if store.dir(pid).exists() else data_dir
+        result = render(req, engine, on_progress=progress, cancel=job.cancel, log_path=log_dir / "last_render.log")
         meta = {"project_id": pid, "mode": s["output"], "frames_swapped": result.frames_swapped,
-                "seconds": round(time.time() - t0, 1), "format": s["vr_format"], "stats": result.to_json()}
+                "seconds": round(time.time() - t0, 1), "format": s["vr_format"],
+                "faces": job.details.get("faces", []), "stats": result.to_json()}
         out.with_suffix(".json").write_text(json.dumps(meta, indent=2))
         job.progress = result.to_json()
         return {"output": out.name, **meta}
 
     @app.get("/api/jobs")
     def list_jobs():
-        return {"jobs": [j.to_json() for j in jobs.active()]}
+        return {"jobs": jobs.listing()}
+
+    @app.post("/api/jobs/clear")
+    def clear_jobs():
+        jobs.clear_finished()
+        return {"jobs": jobs.listing()}
+
+    @app.post("/api/jobs/{job_id}/move")
+    def move_job(job_id: str, body: dict = Body(...)):
+        try:
+            jobs.move(job_id, int(body.get("to", 1)))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        return {"jobs": jobs.listing()}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
-        return jobs.get(job_id).to_json()
+        job = jobs.get(job_id)
+        return job.to_json(jobs.position(job))
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: str):
-        return jobs.cancel(job_id).to_json()
+        job = jobs.cancel(job_id)
+        return job.to_json(jobs.position(job))
 
     # ------------------------------------------------------------- outputs
     @app.get("/api/outputs")

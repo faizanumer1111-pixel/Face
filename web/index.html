@@ -19,6 +19,7 @@
     <select id="project-select"><option value="">Recent projects</option></select>
     <button id="btn-new" class="quiet">New project</button>
   </div>
+  <button id="queue-chip" class="queue-chip" hidden><span class="rec-dot"></span><span id="queue-chip-text"></span></button>
   <div class="engine" id="engine" role="status"><span class="dot"></span><span id="engine-text">Starting up</span></div>
 </header>
 
@@ -128,6 +129,16 @@
       <div class="progress" id="progress" hidden><div id="progress-bar"></div></div>
       <p id="progress-text" class="progress-text"></p>
     </div>
+  </section>
+
+  <section class="panel queue-panel" id="queue-panel" hidden aria-labelledby="queue-title">
+    <div class="panel-head">
+      <h2 id="queue-title">Render queue</h2>
+      <p class="fine">Renders run one after another, top to bottom. Keep working while they run.</p>
+      <div class="spacer"></div>
+      <button id="btn-clear-jobs" class="quiet" hidden>Clear finished</button>
+    </div>
+    <ol id="queue" class="queue"></ol>
   </section>
 
   <section class="panel rendered" id="rendered" aria-labelledby="out-title">

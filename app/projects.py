@@ -123,7 +123,7 @@ class ProjectStore:
                 "name": f.name,
                 "size_mb": round(f.stat().st_size / 1e6, 1),
                 "created": time.strftime("%Y-%m-%d %H:%M", time.localtime(f.stat().st_mtime)),
-                **{k: meta[k] for k in ("project_id", "mode", "frames_swapped", "seconds", "format") if k in meta},
+                **{k: meta[k] for k in ("project_id", "mode", "frames_swapped", "seconds", "format", "faces") if k in meta},
             })
         return out
 

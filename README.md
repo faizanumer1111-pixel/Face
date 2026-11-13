@@ -94,6 +94,13 @@ stop it, press Ctrl+C in Terminal (or close the Terminal window).
 
    **Max quality** gives a slower, higher-quality encode. Face detection can be
    **Fast** (big close-ups), **Standard** or **Thorough** (small or distant faces).
+   You don't have to wait for a render to finish. Keep working, add new videos, and
+   press **Add to queue** as often as you like, including on the same project with
+   different faces (handy for A/B variants). Each render keeps the faces and settings it
+   had when you queued it. The **Render queue** panel runs them one after another, top to
+   bottom: use **Up** and **Down** to change the order, and **Remove** or **Cancel** to
+   drop one. One at a time is on purpose: two renders at once would share the same GPU
+   and both finish later.
 8. **Rendered videos** appear at the bottom with **Download**, **Reveal in Finder** and
    **Delete**. They're saved in `data/outputs/`. VR files end with their format tag,
    such as `_180_LR`.

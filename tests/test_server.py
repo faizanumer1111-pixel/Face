@@ -209,6 +209,53 @@ def test_bad_paths_are_rejected(client):
     assert client.get("/api/projects/zzz").status_code == 404
 
 
+def test_render_queue(tmp_path, small_video):
+    """Queue the same project several times; each render keeps the settings it was queued with."""
+    class Slow(FakeEngine):
+        def detect(self, img, det_size=640):
+            time.sleep(0.03)
+            return super().detect(img, det_size)
+
+    app = create_app(data_dir=tmp_path / "dq", engine_factory=Slow)
+    with TestClient(app, base_url="http://127.0.0.1:7860") as c:
+        with open(small_video, "rb") as f:
+            pid = c.post("/api/projects", files={"video": ("promo.mp4", f)}, headers=H).json()["id"]
+        a, b = add_face(c, tmp_path, "Ava.jpg")
+        c.put(f"/api/projects/{pid}/segments",
+              json={"segments": [{"start": 0, "end": 30, "face": a["id"]}]}, headers=H)
+        j1 = c.post(f"/api/projects/{pid}/render", json={"output": "full"}, headers=H).json()["job"]
+        # switch the face and the output, then queue the same project again
+        c.put(f"/api/projects/{pid}/segments",
+              json={"segments": [{"start": 0, "end": 30, "face": b["id"]}]}, headers=H)
+        j2 = c.post(f"/api/projects/{pid}/render", json={"output": "clips"}, headers=H).json()["job"]
+        j3 = c.post(f"/api/projects/{pid}/render", json={"output": "clips"}, headers=H).json()["job"]
+        assert (j1["position"], j2["position"], j3["position"]) == (1, 2, 3)
+        assert j1["label"] == "promo.mp4 with Ava" and j2["label"] == "promo.mp4 with Ava 2"
+
+        # adding a new video while renders are running works
+        with open(small_video, "rb") as f:
+            assert c.post("/api/projects", files={"video": ("next.mp4", f)}, headers=H).status_code == 200
+
+        # reorder: j3 goes ahead of j2, then j2 is taken out of the queue
+        listing = c.post(f"/api/jobs/{j3['id']}/move", json={"to": 1}, headers=H).json()["jobs"]
+        assert [j["id"] for j in listing[:3]] == [j1["id"], j3["id"], j2["id"]]
+        c.post(f"/api/jobs/{j2['id']}/cancel", headers=H)
+
+        done1 = wait_job(c, j1["id"])
+        done3 = wait_job(c, j3["id"])
+        assert done1["state"] == done3["state"] == "done"
+        assert c.get(f"/api/jobs/{j2['id']}").json()["state"] == "cancelled"
+        # each kept what it was queued with
+        assert done1["result"]["mode"] == "full" and done1["result"]["faces"] == ["Ava"]
+        assert done3["result"]["mode"] == "clips" and done3["result"]["faces"] == ["Ava 2"]
+        outs = c.get("/api/outputs").json()["outputs"]
+        assert len(outs) == 2 and {o["mode"] for o in outs} == {"full", "clips"}
+
+        states = [j["state"] for j in c.get("/api/jobs").json()["jobs"]]
+        assert sorted(states) == ["cancelled", "done", "done"]
+        assert c.post("/api/jobs/clear", headers=H).json()["jobs"] == []
+
+
 def test_cancel_render(tmp_path, small_video):
     class Slow(FakeEngine):
         def detect(self, img, det_size=640):
