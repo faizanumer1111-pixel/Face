@@ -99,7 +99,13 @@
 
   <section class="panel render-panel" id="render-panel" hidden aria-label="Render">
     <div class="look">
-      <h2>Look</h2>
+      <h2>Speed and look</h2>
+      <div class="modes" id="presets" role="group" aria-label="Speed">
+        <button data-preset="fastest" aria-pressed="false">Fastest</button>
+        <button data-preset="balanced" aria-pressed="false">Balanced</button>
+        <button data-preset="best" aria-pressed="false">Best quality</button>
+      </div>
+      <p id="preset-note" class="fine"></p>
       <label class="slider-row">
         <span>Sharper faces</span>
         <input type="range" id="opt-enhance" min="0" max="100" step="5" value="60">

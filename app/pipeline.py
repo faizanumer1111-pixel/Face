@@ -8,9 +8,12 @@ threads so the encoder isn't left waiting.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -48,6 +51,7 @@ class RenderRequest:
     options: SwapOptions = field(default_factory=SwapOptions)
     steady: bool = True
     vr_format: str = "flat"
+    workers: int = 0  # frames swapped at the same time; 0 = pick for this computer
 
 
 @dataclass
@@ -91,6 +95,27 @@ def process_frame(engine, frame: np.ndarray, selector, latent: np.ndarray, det_s
     return faces, targets
 
 
+def default_workers() -> int:
+    """How many frames to swap at once. A Mac's GPU and spare CPU cores keep 2-4 busy."""
+    env = os.environ.get("FACESWAP_WORKERS", "")
+    if env.isdigit() and int(env) > 0:
+        return int(env)
+    return max(1, min(4, (os.cpu_count() or 2) // 3))
+
+
+class _Done:
+    """A finished result that looks like a future (for work that ran on the main thread)."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def done(self) -> bool:
+        return True
+
+    def result(self):
+        return self.value
+
+
 def latents_for(engine, faces: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return {fid: engine.latent(emb) for fid, emb in faces.items()}
 
@@ -128,6 +153,20 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
     last_report = [0.0]
     engine_start = dict(getattr(engine, "timings", {}))
     waits = {"reading video": 0.0, "saving video": 0.0}
+    # Time between finished frames, recent ones only, so a slow start doesn't skew the estimate.
+    swap_gaps: deque = deque(maxlen=60)
+    pass_gaps: deque = deque(maxlen=240)
+    last_done = [None]
+
+    def update_breakdown() -> None:
+        n = max(1, stats.frames_swapped)
+        for step, total in getattr(engine, "timings", {}).items():
+            spent = total - engine_start.get(step, 0.0)
+            if spent > 0:
+                stats.breakdown[step] = spent * 1000 / n
+        for step, total in waits.items():
+            if total > 0.05:
+                stats.breakdown[step] = total * 1000 / n
 
     def report(force: bool = False) -> None:
         now = time.time()
@@ -135,13 +174,18 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
             return
         last_report[0] = now
         stats.elapsed = now - timing.started
-        if timing.swap_n:
-            stats.swap_fps = timing.swap_n / timing.swap_t if timing.swap_t > 0 else 0.0
-        per_swap = timing.swap_t / timing.swap_n if timing.swap_n else 0.25
-        per_pass = timing.pass_t / timing.pass_n if timing.pass_n else 0.002
+        per_swap = sum(swap_gaps) / len(swap_gaps) if len(swap_gaps) >= 3 else None
+        per_pass = sum(pass_gaps) / len(pass_gaps) if pass_gaps else 0.01
         rem_swap = stats.swap_total - stats.frames_swapped
-        rem_pass = (stats.frames_total - stats.frames_written) - rem_swap
-        stats.eta_seconds = max(0.0, rem_swap * per_swap + max(0, rem_pass) * per_pass)
+        rem_pass = max(0, (stats.frames_total - stats.frames_written) - rem_swap)
+        if per_swap:
+            stats.swap_fps = 1.0 / per_swap if per_swap > 0 else 0.0
+            stats.eta_seconds = max(0.0, rem_swap * per_swap + rem_pass * per_pass)
+        elif rem_swap == 0:
+            stats.eta_seconds = rem_pass * per_pass
+        else:
+            stats.eta_seconds = None  # still measuring
+        update_breakdown()
         if on_progress:
             on_progress(stats)
 
@@ -170,6 +214,28 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
         t0 = time.perf_counter()
         out_q.put(frame)
         waits["saving video"] += time.perf_counter() - t0
+
+    workers = req.workers or default_workers()
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="swap") if workers > 1 else None
+    inflight = max(2, workers * 2)
+    pending: deque = deque()  # (future or None, frame, swapped?) in video order
+
+    def finish_one() -> None:
+        fut, frame, swapped = pending.popleft()
+        if fut is not None:
+            result = fut.result()
+            stats.faces_swapped += result.swapped
+            if not result.swapped:
+                stats.frames_without_target += 1
+        put(frame)
+        stats.frames_written += 1
+        if swapped:
+            stats.frames_swapped += 1
+        now = time.perf_counter()
+        if last_done[0] is not None:
+            (swap_gaps if swapped else pass_gaps).append(now - last_done[0])
+        last_done[0] = now
+        report()
 
     try:
         for r_start, r_end in ranges:
@@ -209,26 +275,24 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
                         seg_i += 1
                         selector = None
                     seg = segments[seg_i] if seg_i < len(segments) and segments[seg_i].start <= i else None
-                    t0 = time.perf_counter()
                     if seg is not None:
                         if selector is None:
                             selector = FrameProcessor(engine, layout, latents, req.options, req.det_size,
                                                       selector_for(seg, req.references, req.default_face, fps),
                                                       steady=req.steady)
-                        result = selector.process(frame)
-                        stats.frames_swapped += 1
-                        stats.faces_swapped += result.swapped
-                        if not result.swapped:
-                            stats.frames_without_target += 1
-                        put(frame)
-                        timing.swap_t += time.perf_counter() - t0
-                        timing.swap_n += 1
+                        if pool is not None and selector.can_split:
+                            # Decide who gets swapped here, in order; do the swapping on a worker.
+                            plan = selector.plan(frame)
+                            pending.append((pool.submit(selector.apply, frame, plan), frame, True))
+                        else:
+                            pending.append((_Done(selector.process(frame)), frame, True))
                     else:
-                        put(frame)
-                        timing.pass_t += time.perf_counter() - t0
-                        timing.pass_n += 1
-                    stats.frames_written += 1
-                    report()
+                        pending.append((None, frame, False))
+                    # Save finished frames in order; keep at most `inflight` frames waiting.
+                    while pending and (len(pending) > inflight or pending[0][0] is None or pending[0][0].done()):
+                        finish_one()
+                while pending:
+                    finish_one()
             finally:
                 stop.set()
                 if reader.proc.poll() is None:
@@ -249,6 +313,9 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
         else:
             tmp.replace(req.output_path)
     except BaseException:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+            pool = None
         if wthread.is_alive():
             # Unblock the writer thread, then kill the encoder.
             try:
@@ -261,15 +328,9 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
         writer.abort()
         tmp.unlink(missing_ok=True)
         raise
-    # Where the time went, per swapped frame (waits are spread over the whole render).
-    n = max(1, stats.frames_swapped)
-    for step, total in getattr(engine, "timings", {}).items():
-        spent = total - engine_start.get(step, 0.0)
-        if spent > 0:
-            stats.breakdown[step] = spent * 1000 / n
-    for step, total in waits.items():
-        if total > 0.05:
-            stats.breakdown[step] = total * 1000 / n
+    if pool is not None:
+        pool.shutdown(wait=True)
+    update_breakdown()  # where the time went, per swapped frame
     report(force=True)
     stats.eta_seconds = 0.0
     return stats

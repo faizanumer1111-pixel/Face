@@ -3,6 +3,11 @@
 // FaceSwap Studio front end. Talks only to the local server it was served from.
 
 const $ = (id) => document.getElementById(id);
+const PRESET_NOTE = {
+  fastest: "No sharpening and quick face detection. Best for long videos and drafts.",
+  balanced: "Keeps hands and hair in front of the face. No sharpening.",
+  best: "Everything on, including sharpening. Slowest, for final renders.",
+};
 const MODE_LABEL = { cast: "Picked people", everyone: "Everyone", main: "Whoever's on screen" };
 
 const S = {
@@ -279,6 +284,8 @@ function setProject(p, keepVideo = false) {
     $("opt-enhance").value = Math.round((s.enhance ?? 0.6) * 100);
     $("opt-enhance-out").textContent = `${$("opt-enhance").value}%`;
     $("opt-occlusion").checked = !!s.occlusion;
+    for (const b of document.querySelectorAll("#presets button")) b.setAttribute("aria-pressed", String(b.dataset.preset === s.preset));
+    $("preset-note").textContent = PRESET_NOTE[s.preset] || "Your own mix of the options below.";
     $("opt-color").checked = !!s.color_match;
     $("opt-steady").checked = !!s.steady;
     if ($("vr-format").options.length) $("vr-format").value = s.vr_format;
@@ -783,8 +790,11 @@ function jobProgressText(j) {
     if (!p.frames_total) return "Starting";
     if (p.frames_swapped < p.swap_total) {
       let t = `Swapping frame ${p.frames_swapped.toLocaleString()} of ${p.swap_total.toLocaleString()}`;
+      if (p.eta_seconds == null) return `${t}. Measuring speed.`;
       if (p.swap_fps) t += ` at ${p.swap_fps.toFixed(1)} frames a second`;
-      if (p.eta_seconds != null && p.frames_swapped > 0) t += `. About ${fmtDuration(p.eta_seconds)} left.`;
+      t += `. About ${fmtDuration(p.eta_seconds)} left.`;
+      const slow = slowestSteps(p.breakdown);
+      if (slow) t += ` Slowest step: ${slow}.`;
       return t;
     }
     return "Saving the video";
@@ -997,6 +1007,7 @@ function wire() {
   for (const r of document.querySelectorAll("input[name=output]")) r.addEventListener("change", () => patchSettings({ output: r.value }));
   $("max-quality").addEventListener("change", (e) => patchSettings({ max_quality: e.target.checked }));
   $("det-size").addEventListener("change", (e) => patchSettings({ det_size: Number(e.target.value) }).then(() => scheduleBoxes(true)));
+  for (const b of document.querySelectorAll("#presets button")) b.addEventListener("click", () => patchSettings({ preset: b.dataset.preset }));
   $("opt-enhance").addEventListener("input", (e) => { $("opt-enhance-out").textContent = `${e.target.value}%`; });
   $("opt-enhance").addEventListener("change", (e) => patchSettings({ enhance: Number(e.target.value) / 100 }));
   $("opt-occlusion").addEventListener("change", (e) => patchSettings({ occlusion: e.target.checked }));

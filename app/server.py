@@ -34,18 +34,31 @@ from .projects import FaceLibrary, ProjectStore, safe_stem
 from .segments import (MODES, Segment, SegmentError, check_ready, format_timecode, frame_to_seconds, from_json,
                        normalize, stats)
 from .targets import iou
-from .video_io import (VideoError, VideoInfo, encode_jpeg, encoder_name, face_crop, load_image, prepare_source,
-                       read_frame)
+from .video_io import (VideoError, VideoInfo, encode_jpeg, encoder_name, face_crop, load_image, make_proxy,
+                       prepare_source, read_frame)
 from .vr import FILENAME_TAGS, FORMAT_LABELS, FORMATS, Layout, eyes
 
 log = logging.getLogger("faceswap")
 
 FACE_MISSING = "No face found in your photo — use a clear, front-facing shot."
 DET_SIZES = (320, 640, 960)
-DEFAULT_SETTINGS = {
-    "output": "full", "max_quality": False, "det_size": 640, "default_mode": "everyone",
-    "enhance": 0.6, "occlusion": True, "color_match": True, "steady": True, "vr_format": "flat",
+# Speed presets. Fastest is the default: speed first, quality options one click away.
+PRESETS = {
+    "fastest": {"enhance": 0.0, "occlusion": False, "det_size": 320},
+    "balanced": {"enhance": 0.0, "occlusion": True, "det_size": 640},
+    "best": {"enhance": 0.6, "occlusion": True, "det_size": 640},
 }
+DEFAULT_SETTINGS = {
+    "output": "full", "max_quality": False, "default_mode": "everyone",
+    "color_match": True, "steady": True, "vr_format": "flat", **PRESETS["fastest"],
+}
+
+
+def preset_of(settings: dict) -> str:
+    for name, values in PRESETS.items():
+        if all(settings.get(k) == v for k, v in values.items()):
+            return name
+    return "custom"
 
 
 class EngineHolder:
@@ -60,7 +73,12 @@ class EngineHolder:
 
     def _load(self) -> None:
         try:
-            self.engine = self._factory()
+            engine = self._factory()
+            if hasattr(engine, "warm_up"):
+                t0 = time.time()
+                engine.warm_up()
+                log.info("Models warmed up in %.1fs", time.time() - t0)
+            self.engine = engine
         except Exception as exc:
             self.error = str(exc)
             log.error("Couldn't load the face models: %s", exc)
@@ -196,6 +214,7 @@ def create_app(data_dir: Path = config.DATA_DIR, models_dir: Path = config.MODEL
         out = dict(project)
         pid = project["id"]
         out["settings"] = settings_of(project)
+        out["settings"]["preset"] = preset_of(out["settings"])
         out["default_face"] = default_face(project)
         if project.get("video"):
             info = info_of(project)
@@ -313,6 +332,17 @@ def create_app(data_dir: Path = config.DATA_DIR, models_dir: Path = config.MODEL
         project["notes"] = notes
         project["settings"] = {**DEFAULT_SETTINGS, "vr_format": info.vr_format}
         store.save(project)
+        if info.needs_proxy:
+            # A light copy for smooth scrubbing, made in the background so the page is usable now.
+            work, proxy = store.file(pid, "work.mp4"), store.file(pid, "proxy.mp4")
+
+            def make() -> None:
+                try:
+                    make_proxy(work, proxy, info)
+                except Exception as exc:  # the full-size file still plays, just less smoothly
+                    log.warning("Couldn't make the preview copy: %s", exc)
+
+            threading.Thread(target=make, name="proxy", daemon=True).start()
         return view(project)
 
     @app.get("/api/projects/{pid}")
@@ -337,6 +367,10 @@ def create_app(data_dir: Path = config.DATA_DIR, models_dir: Path = config.MODEL
     def update_settings(pid: str, body: dict = Body(...)):
         project = store.get(pid)
         s = project.setdefault("settings", dict(DEFAULT_SETTINGS))
+        if "preset" in body:
+            if body["preset"] not in PRESETS:
+                raise HTTPException(422, "Unknown speed setting.")
+            s.update(PRESETS[body["preset"]])
         if "output" in body:
             if body["output"] not in OUTPUT_MODES:
                 raise HTTPException(422, "Output must be full or clips.")

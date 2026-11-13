@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import platform
 import threading
 import time
@@ -197,6 +198,8 @@ def make_session(path: Path, choice: str = "cpu", cache_dir: Path | None = None)
     """
     so = ort.SessionOptions()
     so.log_severity_level = 3
+    # Leave CPU cores free for video decoding/encoding, parallel swaps and the web page.
+    so.intra_op_num_threads = max(2, (os.cpu_count() or 4) // 2)
     if choice != "cpu":
         for providers in _provider_attempts(choice, cache_dir):
             try:
@@ -606,6 +609,22 @@ class FaceEngine:
             sess, self.occlude_provider = make_session(models_dir / OCCLUDE_MODEL, providers.get("occlude", "cpu"), cache)
             self.occluder = Occluder(sess)
         log.info("Models loaded in %.1fs (%s)", time.time() - t0, self.providers)
+
+    def warm_up(self) -> None:
+        """Run every model once so the first preview or render frame isn't the slow one.
+
+        The Mac's GPU prepares each model on its first use, which can take several seconds.
+        """
+        img = np.full((360, 640, 3), 128, np.uint8)
+        for size in (320, 640):
+            self.detector.detect(img, size)
+        kps = np.array([[240, 150], [290, 150], [265, 178], [245, 205], [285, 205]], np.float32)
+        face = Face(bbox=np.array([200, 100, 330, 240], np.float32), kps=kps, score=1.0)
+        self.embedder.embed(img, face)
+        lat = self.latent(np.full(512, 1 / np.sqrt(512), np.float32))
+        self.swap(img.copy(), face, lat, SwapOptions(occlusion=True, enhance=1.0, color_match=True))
+        with self._timing_lock:
+            self.timings.clear()
 
     @property
     def providers(self) -> dict[str, str]:

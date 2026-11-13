@@ -14,6 +14,13 @@ from .vr import Layout, eyes, match_between_eyes, view_for_face
 
 
 @dataclass
+class Plan:
+    jobs: list  # (eye, face, latent) for every swap to do
+    faces: int = 0
+    similarities: list | None = None
+
+
+@dataclass
 class FrameResult:
     faces: int = 0  # faces found (left eye for 3D/VR)
     swapped: int = 0  # faces swapped (all eyes)
@@ -72,13 +79,20 @@ class FrameProcessor:
     def _latent(self, face: Face) -> np.ndarray | None:
         return self.latents.get(face.source)
 
+    @property
+    def can_split(self) -> bool:
+        """Normal and 3D frames can be planned in order and swapped in parallel; VR can't (yet)."""
+        return not self.layout.is_vr
+
     def process(self, frame: np.ndarray) -> FrameResult:
         if self.layout.is_vr:
             return self._process_vr(frame)
-        return self._process_flat(frame)
+        return self.apply(frame, self.plan(frame))
 
     # ----------------------------------------------------------- normal and 3D
-    def _process_flat(self, frame: np.ndarray) -> FrameResult:
+    def plan(self, frame: np.ndarray) -> Plan:
+        """Find the faces and decide who gets which face. Must run frame by frame, in order,
+        because tracking and smoothing carry over from one frame to the next."""
         views = eyes(frame, self.layout)
         found = [self.engine.detect(v, self.det_size) for v in views]
         left = found[0]
@@ -86,8 +100,7 @@ class FrameProcessor:
             for f in left:
                 self.engine.embed(views[0], f)
         targets = self.selector.select(left, views[0].shape)
-        res = FrameResult(faces=len(left), similarities=getattr(self.selector, "last_similarities", None))
-        jobs = [(0, targets)]
+        per_eye = [(0, targets)]
         if len(views) == 2:
             pairs = match_between_eyes(left, found[1])
             chosen = {id(t) for t in targets}
@@ -96,16 +109,23 @@ class FrameProcessor:
                 if id(f) in chosen and i in pairs:
                     pairs[i].source = f.source
                     right_targets.append(pairs[i])
-            jobs.append((1, right_targets))
-        for eye, faces in jobs:
+            per_eye.append((1, right_targets))
+        jobs = []
+        for eye, faces in per_eye:
             if self.steady:
                 self.smoothers[eye].smooth(faces)
             for f in faces:
                 lat = self._latent(f)
                 if lat is not None:
-                    self.engine.swap(views[eye], f, lat, self.opts)
-                    res.swapped += 1
-        return res
+                    jobs.append((eye, f, lat))
+        return Plan(jobs=jobs, faces=len(left), similarities=getattr(self.selector, "last_similarities", None))
+
+    def apply(self, frame: np.ndarray, plan: Plan) -> FrameResult:
+        """Do the planned swaps. Frames are independent here, so several can run at once."""
+        views = eyes(frame, self.layout)
+        for eye, f, lat in plan.jobs:
+            self.engine.swap(views[eye], f, lat, self.opts)
+        return FrameResult(faces=plan.faces, swapped=len(plan.jobs), similarities=plan.similarities)
 
     # ----------------------------------------------------------------- VR
     def _view_face(self, eye_img: np.ndarray, eye: int, face_eq: Face):

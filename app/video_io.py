@@ -78,11 +78,11 @@ def has_filter(name: str) -> bool:
 
 @functools.lru_cache(maxsize=1)
 def hw_decode_args() -> tuple[str, ...]:
-    """["-hwaccel", "videotoolbox"] on a Mac where the hardware video decoder works, else nothing.
+    """["-hwaccel", "videotoolbox"] when hardware decoding is switched on, else nothing.
 
-    Checked once by decoding a tiny test clip; set FACESWAP_NO_HWDECODE=1 to turn it off.
+    Off unless FACESWAP_HWDECODE=1: software decoding is the setting proven on real Macs.
     """
-    if platform.system() != "Darwin" or os.environ.get("FACESWAP_NO_HWDECODE"):
+    if platform.system() != "Darwin" or os.environ.get("FACESWAP_HWDECODE") != "1":
         return ()
     with tempfile.TemporaryDirectory() as td:
         clip = Path(td) / "t.mp4"
@@ -125,6 +125,7 @@ class VideoInfo:
     vr_reason: str | None = None  # why we think it's VR/3D
     vr_hint: bool = False  # big 2:1 or square frame: might be VR
     has_proxy: bool = False  # a small browser copy exists (proxy.mp4)
+    needs_proxy: bool = False  # big or not H.264: the browser should get a small copy
 
     @property
     def fps(self) -> Fraction:
@@ -376,8 +377,7 @@ def prepare_source(src: Path, work: Path) -> tuple[VideoInfo, list[str]]:
     elif info.vr_hint:
         notes.append("This might be VR footage. If it is, choose the right one under Video format.")
     if info.codec != "h264" or max(info.width, info.height) > 2560:
-        make_proxy(work, work.with_name("proxy.mp4"), info)
-        info.has_proxy = True
+        info.needs_proxy = True  # made in the background by the app, so importing returns at once
     return info, notes
 
 
@@ -387,15 +387,17 @@ def make_proxy(work: Path, proxy: Path, info: VideoInfo) -> None:
     gop = max(1, int(round(float(info.fps))))
     head = ["-i", str(work), "-map", "0:v:0", "-map", "0:a:0?", "-vf", scale + ",format=yuv420p"]
     tail = ["-g", str(gop), *fps_mode_args("passthrough"), "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart", str(proxy)]
+            "-movflags", "+faststart", "-f", "mp4", str(proxy) + ".part"]
     if hw_encoder_works("h264_videotoolbox"):
         # Mac media engine for both decoding and encoding: much faster for 4K and 8K VR.
         proc = subprocess.run([ffmpeg_bin(), "-y", "-v", "error", *hw_decode_args(), *head,
                                "-c:v", "h264_videotoolbox", "-b:v", "8M", *tail], capture_output=True)
         if proc.returncode == 0:
+            Path(str(proxy) + ".part").replace(proxy)
             return
     _run([ffmpeg_bin(), "-y", "-v", "error", *head, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", *tail],
          "Couldn't make the preview copy")
+    Path(str(proxy) + ".part").replace(proxy)
 
 
 def _run(cmd: list[str], what: str) -> None:

@@ -1,4 +1,5 @@
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -101,3 +102,26 @@ def test_cancel_leaves_no_file(work, tmp_path, fake_engine):
                cancel=cancel)
     assert not out.exists()
     assert not list(tmp_path.glob("*.partial.mp4"))
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_parallel_swapping_keeps_frame_order(work, tmp_path, fake_engine, workers):
+    """Frames swapped on several workers come out identical, and in the same order, as one at a time."""
+    path, info = work
+
+    class Marking(type(fake_engine)):
+        def swap(self, img, face, latent, opts=None):
+            time.sleep(0.002 * (hash(img.tobytes()[:64]) % 5))  # finish out of order on purpose
+            super().swap(img, face, latent, opts)
+
+    segs = [Segment(5, 30, "everyone"), Segment(40, 70, "main")]
+    outs = {}
+    for w in (1, workers):
+        out = tmp_path / f"w{w}.mp4"
+        stats = render(RenderRequest(path, info, {"f": LEFT_ID}, "f", segs, {}, out, "full", workers=w), Marking())
+        assert stats.frames_swapped == 55 and stats.frames_written == 75
+        assert set(stats.breakdown) >= set()  # filled in for real engines
+        outs[w] = frames_of(out, probe(out))
+    a, b = outs[1], outs[workers]
+    assert len(a) == len(b) == 75
+    assert all(np.array_equal(x, y) for x, y in zip(a, b))
