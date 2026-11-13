@@ -760,6 +760,22 @@ async function refreshJobs() {
   if (S.jobs.some((j) => ACTIVE.includes(j.state))) S.pollTimer = setTimeout(refreshJobs, 800);
 }
 
+const STEP_LABEL = {
+  detect: "finding faces", match: "recognising people", hands: "keeping hands in front", swap: "the face swap",
+  sharpen: "sharpening", "reading video": "reading the video", "saving video": "saving the video",
+};
+
+function slowestSteps(breakdown) {
+  // "sharpening (72 ms a frame) and the face swap (22 ms)" from the render's timing breakdown
+  const steps = Object.entries(breakdown || {}).filter(([, ms]) => ms >= 1).sort((a, b) => b[1] - a[1]).slice(0, 2);
+  if (!steps.length) return "";
+  const fmt = (ms) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`);
+  const [first, second] = steps;
+  let t = `${STEP_LABEL[first[0]] || first[0]} (${fmt(first[1])} a frame)`;
+  if (second) t += ` and ${STEP_LABEL[second[0]] || second[0]} (${fmt(second[1])})`;
+  return t;
+}
+
 function jobProgressText(j) {
   const p = j.progress || {};
   if (j.state === "queued") return "Waiting";
@@ -776,6 +792,8 @@ function jobProgressText(j) {
   if (j.state === "done") {
     let t = `Done in ${fmtDuration((j.result || {}).seconds)}.`;
     if (p.frames_without_target) t += ` ${p.frames_without_target} segment frame(s) had nobody to swap.`;
+    const slow = slowestSteps(p.breakdown);
+    if (slow) t += ` Most time went to ${slow}.`;
     return t;
   }
   if (j.state === "cancelled") return "Cancelled.";

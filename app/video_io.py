@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import logging
 import platform
 import shutil
@@ -73,6 +74,37 @@ def _filters() -> str:
 
 def has_filter(name: str) -> bool:
     return f" {name} " in _filters()
+
+
+@functools.lru_cache(maxsize=1)
+def hw_decode_args() -> tuple[str, ...]:
+    """["-hwaccel", "videotoolbox"] on a Mac where the hardware video decoder works, else nothing.
+
+    Checked once by decoding a tiny test clip; set FACESWAP_NO_HWDECODE=1 to turn it off.
+    """
+    if platform.system() != "Darwin" or os.environ.get("FACESWAP_NO_HWDECODE"):
+        return ()
+    with tempfile.TemporaryDirectory() as td:
+        clip = Path(td) / "t.mp4"
+        made = subprocess.run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30",
+                               "-frames:v", "5", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip)],
+                              capture_output=True)
+        if made.returncode != 0:
+            return ()
+        out = subprocess.run([ffmpeg_bin(), "-v", "error", "-hwaccel", "videotoolbox", "-i", str(clip),
+                              "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], capture_output=True)
+        ok = out.returncode == 0 and len(out.stdout) == 5 * 320 * 240 * 3
+    return ("-hwaccel", "videotoolbox") if ok else ()
+
+
+@functools.lru_cache(maxsize=4)
+def hw_encoder_works(name: str) -> bool:
+    if platform.system() != "Darwin":
+        return False
+    test = subprocess.run(
+        [ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30", "-frames:v", "10",
+         "-c:v", name, "-b:v", "2M", "-f", "null", "-"], capture_output=True)
+    return test.returncode == 0
 
 
 @dataclass
@@ -318,8 +350,19 @@ def prepare_source(src: Path, work: Path) -> tuple[VideoInfo, list[str]]:
                    "-x265-params", f"keyint={gop}:log-level=error"]
         else:
             enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-g", str(gop)]
-        cmd += [*enc, *color_tags(matrix), *audio_args, "-movflags", "+faststart", "-map_metadata", "-1", str(work)]
-        _run(cmd, "Couldn't convert this video")
+        tail = [*color_tags(matrix), *audio_args, "-movflags", "+faststart", "-map_metadata", "-1", str(work)]
+        hw_name = "hevc_videotoolbox" if big else "h264_videotoolbox"
+        if hw_encoder_works(hw_name):
+            # The Mac's media engine converts several times faster than the CPU. It's only an
+            # in-between copy, so a generous bitrate keeps it visually lossless.
+            bitrate = int(min(200e6, max(12e6, width * height * float(rate) * (0.25 if big else 0.35))))
+            hw_cmd = [ffmpeg_bin(), "-y", "-v", "error", *hw_decode_args(), *cmd[4:],
+                      "-c:v", hw_name, "-b:v", str(bitrate), "-g", str(gop),
+                      *(["-tag:v", "hvc1"] if big else []), *tail]
+            if subprocess.run(hw_cmd, capture_output=True).returncode == 0:
+                cmd = None
+        if cmd is not None:
+            _run(cmd + enc + tail, "Couldn't convert this video")
 
     info = probe(work)
     if info.total_frames <= 0:
@@ -332,7 +375,7 @@ def prepare_source(src: Path, work: Path) -> tuple[VideoInfo, list[str]]:
         notes.append(f"Looks like {FORMAT_LABELS[vr_format]} (from {vr_reason}). You can change this under Video format.")
     elif info.vr_hint:
         notes.append("This might be VR footage. If it is, choose the right one under Video format.")
-    if info.codec != "h264" or info.width > 3840 or info.height > 2160:
+    if info.codec != "h264" or max(info.width, info.height) > 2560:
         make_proxy(work, work.with_name("proxy.mp4"), info)
         info.has_proxy = True
     return info, notes
@@ -342,16 +385,17 @@ def make_proxy(work: Path, proxy: Path, info: VideoInfo) -> None:
     """A light H.264 copy for the browser: every frame kept (so frame numbers match), max 1920 px."""
     scale = "scale='if(gt(iw,ih),min(1920,iw),-2)':'if(gt(iw,ih),-2,min(1920,ih))'"
     gop = max(1, int(round(float(info.fps))))
-    base = ["-i", str(work), "-map", "0:v:0", "-map", "0:a:0?", "-vf", scale + ",format=yuv420p",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-g", str(gop), *fps_mode_args("passthrough"),
-            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(proxy)]
-    if platform.system() == "Darwin":
-        # Hardware decoding makes 8K HEVC much faster to convert; fall back without it.
-        proc = subprocess.run([ffmpeg_bin(), "-y", "-v", "error", "-hwaccel", "videotoolbox", *base],
-                              capture_output=True, text=True)
+    head = ["-i", str(work), "-map", "0:v:0", "-map", "0:a:0?", "-vf", scale + ",format=yuv420p"]
+    tail = ["-g", str(gop), *fps_mode_args("passthrough"), "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart", str(proxy)]
+    if hw_encoder_works("h264_videotoolbox"):
+        # Mac media engine for both decoding and encoding: much faster for 4K and 8K VR.
+        proc = subprocess.run([ffmpeg_bin(), "-y", "-v", "error", *hw_decode_args(), *head,
+                               "-c:v", "h264_videotoolbox", "-b:v", "8M", *tail], capture_output=True)
         if proc.returncode == 0:
             return
-    _run([ffmpeg_bin(), "-y", "-v", "error", *base], "Couldn't make the preview copy")
+    _run([ffmpeg_bin(), "-y", "-v", "error", *head, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", *tail],
+         "Couldn't make the preview copy")
 
 
 def _run(cmd: list[str], what: str) -> None:
@@ -380,8 +424,16 @@ class FrameReader:
     def __init__(self, path: Path, info: VideoInfo, start: int = 0, count: int | None = None):
         self.info = info
         self.count = info.total_frames - start if count is None else count
+        self.path, self.start = path, start
+        self.read_any = False
+        self.hw = bool(hw_decode_args())
+        self._start_ffmpeg()
+
+    def _start_ffmpeg(self) -> None:
+        info = self.info
         rng = "pc" if info.full_range else "tv"
-        cmd = [ffmpeg_bin(), "-v", "error", "-nostdin", *seek_args(start, info.fps), "-i", str(path),
+        hw = list(hw_decode_args()) if self.hw else []
+        cmd = [ffmpeg_bin(), "-v", "error", "-nostdin", *hw, *seek_args(self.start, info.fps), "-i", str(self.path),
                "-map", "0:v:0", "-frames:v", str(self.count),
                "-vf", f"scale=in_color_matrix={info.matrix}:in_range={rng}:flags={SWS_FLAGS},format=bgr24",
                *fps_mode_args("passthrough"), "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
@@ -389,6 +441,19 @@ class FrameReader:
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=self._err, bufsize=info.frame_bytes)
 
     def read(self) -> np.ndarray | None:
+        frame = self._read()
+        if frame is None and not self.read_any and self.hw:
+            # The hardware decoder couldn't handle this file: start again in software.
+            log.warning("Hardware decoding failed (%s); using software decoding", self.error_text()[-200:])
+            self.close()
+            self.hw = False
+            self._start_ffmpeg()
+            frame = self._read()
+        if frame is not None:
+            self.read_any = True
+        return frame
+
+    def _read(self) -> np.ndarray | None:
         n = self.info.frame_bytes
         buf = bytearray(n)
         view = memoryview(buf)

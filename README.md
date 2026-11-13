@@ -125,6 +125,22 @@ VR is the heaviest case. Both eyes are swapped, VR is often 60 frames a second, 
 frames are about 15× the pixels of 1080p. Expect VR renders to take several times longer
 per second of footage than a normal ad, so mark only the moments you need.
 
+When a render finishes, the queue says where most of the time went, for example
+"sharpening (72 ms a frame)". To go faster:
+
+- **Quick drafts:** set **Sharper faces** to 0%. Sharpening is usually the slowest step,
+  so this roughly halves render time. Turn it back up for the final version.
+- **Big, close-up faces:** use **Fast** face detection.
+- **Only need the swapped moments:** choose **Just the segments**. The rest of the video
+  isn't processed at all.
+- **Short segments:** mark only the moments that need a different face.
+
+The app already does these on its own:
+
+- It uses the Mac's built-in video engine to decode and encode footage.
+- It makes a light preview copy of 4K and VR videos, so scrubbing stays smooth.
+- It skips sharpening on small faces, where it adds nothing.
+
 ## Troubleshooting
 
 | What you see | What to do |

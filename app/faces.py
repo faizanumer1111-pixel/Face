@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import platform
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,8 @@ ENHANCE_MODEL = "gfpgan_1.4.onnx"  # sharper faces
 OCCLUDE_MODEL = "xseg_1.onnx"  # hands / hair / objects in front of the face
 MODEL_FILES = (DET_MODEL, REC_MODEL, SWAP_MODEL)
 OPTIONAL_MODEL_FILES = (ENHANCE_MODEL, OCCLUDE_MODEL)
+MASK_RES = 256  # blend masks are built at no more than this size, then scaled up
+SHARPEN_MIN_FACE = 96  # faces shorter than this (pixels) are already as sharp as the swap gets
 
 # Face template GFPGAN was trained on (FFHQ alignment), for a 512 px crop.
 FFHQ_512 = np.array(
@@ -414,24 +417,29 @@ class Swapper:
         im_roi[1, 2] -= y0
 
         fake = cv2.warpAffine(bgr_fake, im_roi, (rw, rh), borderValue=0.0)
+        # The blend mask is smooth, so it's built at no more than MASK_RES pixels and
+        # scaled up. On a big 4K face that's ~20x less work for the same mask.
+        sc = min(1.0, MASK_RES / max(rw, rh))
+        sw, sh = max(1, round(rw * sc)), max(1, round(rh * sc))
+        im_small = im_roi * sc
         white = np.full((size, size), 255, dtype=np.float32)
-        mask = cv2.warpAffine(white, im_roi, (rw, rh), borderValue=0.0)
+        mask = cv2.warpAffine(white, im_small, (sw, sh), borderValue=0.0)
         mask[mask > 20] = 255
         ys, xs = np.where(mask == 255)
         if ys.size == 0:
             return
-        mask_size = int(np.sqrt((ys.max() - ys.min()) * (xs.max() - xs.min())))
-        k = max(mask_size // 10, 10)
+        mask_size = np.sqrt((ys.max() - ys.min()) * (xs.max() - xs.min())) / sc  # in full-size pixels
+        k = max(1, round(max(int(mask_size) // 10, 10) * sc))
         mask = cv2.erode(mask, np.ones((k, k), np.uint8), iterations=1)
-        k = max(mask_size // 20, 5)
-        mask = cv2.GaussianBlur(mask, (2 * k + 1, 2 * k + 1), 0)
-        mask = mask / 255.0
+        k = max(1, round(max(int(mask_size) // 20, 5) * sc))
+        mask = cv2.GaussianBlur(mask, (2 * k + 1, 2 * k + 1), 0) / 255.0
         if extra_mask is not None:
-            mask *= cv2.warpAffine(extra_mask.astype(np.float32), im_roi, (rw, rh), borderValue=0.0)
-        mask = mask[:, :, None]
-        roi = img[y0:y1, x0:x1]
-        merged = mask * fake.astype(np.float32) + (1 - mask) * roi.astype(np.float32)
-        img[y0:y1, x0:x1] = merged.astype(np.uint8)
+            mask *= cv2.warpAffine(extra_mask.astype(np.float32), im_small, (sw, sh), borderValue=0.0)
+        if sc < 1.0:
+            mask = cv2.resize(mask, (rw, rh), interpolation=cv2.INTER_LINEAR)
+        mask = np.ascontiguousarray(mask, dtype=np.float32)
+        roi = np.ascontiguousarray(img[y0:y1, x0:x1])
+        img[y0:y1, x0:x1] = cv2.blendLinear(fake, roi, mask, 1.0 - mask)
 
 
 _INNER = None
@@ -474,10 +482,16 @@ def paste_crop(img: np.ndarray, crop: np.ndarray, m: np.ndarray, mask: np.ndarra
     im_roi = im.copy()
     im_roi[0, 2] -= x0
     im_roi[1, 2] -= y0
-    warped = cv2.warpAffine(crop, im_roi, (x1 - x0, y1 - y0), borderValue=0.0).astype(np.float32)
-    a = cv2.warpAffine(mask.astype(np.float32), im_roi, (x1 - x0, y1 - y0), borderValue=0.0)[:, :, None]
-    roi = img[y0:y1, x0:x1].astype(np.float32)
-    img[y0:y1, x0:x1] = (a * warped + (1 - a) * roi).astype(np.uint8)
+    rw, rh = x1 - x0, y1 - y0
+    warped = cv2.warpAffine(crop, im_roi, (rw, rh), borderValue=0.0)
+    sc = min(1.0, MASK_RES / max(rw, rh))  # smooth mask: build small, scale up
+    a = cv2.warpAffine(mask.astype(np.float32), im_roi * sc, (max(1, round(rw * sc)), max(1, round(rh * sc))),
+                       borderValue=0.0)
+    if sc < 1.0:
+        a = cv2.resize(a, (rw, rh), interpolation=cv2.INTER_LINEAR)
+    a = np.ascontiguousarray(a, dtype=np.float32)
+    roi = np.ascontiguousarray(img[y0:y1, x0:x1])
+    img[y0:y1, x0:x1] = cv2.blendLinear(warped, roi, a, 1.0 - a)
 
 
 class Occluder:
@@ -573,6 +587,8 @@ class FaceEngine:
                 "Missing model files: " + ", ".join(missing) + ". Run scripts/setup.sh to download them."
             )
         providers = providers or {}
+        self.timings: dict[str, float] = {}
+        self._timing_lock = threading.Lock()
         cache = models_dir / "coreml-cache"
         t0 = time.time()
         det_sess, self.det_provider = make_session(models_dir / DET_MODEL, providers.get("det", "cpu"), cache)
@@ -604,11 +620,24 @@ class FaceEngine:
     def features(self) -> dict[str, bool]:
         return {"enhance": self.enhancer is not None, "occlusion": self.occluder is not None}
 
+    # Time spent in each step, so a render can report what took longest.
+    def _tick(self, step: str, t0: float) -> None:
+        with self._timing_lock:
+            self.timings[step] = self.timings.get(step, 0.0) + (time.perf_counter() - t0)
+
     def detect(self, img: np.ndarray, det_size: int = 640) -> list[Face]:
-        return self.detector.detect(img, det_size)
+        t0 = time.perf_counter()
+        try:
+            return self.detector.detect(img, det_size)
+        finally:
+            self._tick("detect", t0)
 
     def embed(self, img: np.ndarray, face: Face) -> np.ndarray:
-        return self.embedder.embed(img, face)
+        t0 = time.perf_counter()
+        try:
+            return self.embedder.embed(img, face)
+        finally:
+            self._tick("match", t0)
 
     def latent(self, embedding: np.ndarray) -> np.ndarray:
         return self.swapper.latent(embedding)
@@ -617,11 +646,18 @@ class FaceEngine:
         """Swap one face in place: occlusion mask, swap, lighting match, sharpening."""
         opts = opts or SwapOptions(occlusion=False, enhance=0.0, color_match=False)
         visible = None
+        t0 = time.perf_counter()
         if opts.occlusion and self.occluder is not None:
             visible = self.occluder.mask(img, face.kps, self.swapper.size)
+            self._tick("hands", t0)
+            t0 = time.perf_counter()
         _, m128 = self.swapper.swap(img, face, latent, visible, opts.color_match)
-        if opts.enhance > 0 and self.enhancer is not None:
+        self._tick("swap", t0)
+        # Small faces are already as sharp as the swap can make them; sharpening them only costs time.
+        if opts.enhance > 0 and self.enhancer is not None and face.bbox[3] - face.bbox[1] >= SHARPEN_MIN_FACE:
+            t0 = time.perf_counter()
             self.enhancer.enhance(img, face.kps, opts.enhance, visible, m128)
+            self._tick("sharpen", t0)
 
 
 def is_mac() -> bool:

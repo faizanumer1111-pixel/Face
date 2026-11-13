@@ -61,9 +61,12 @@ class RenderStats:
     eta_seconds: float | None = None
     elapsed: float = 0.0
     frames_without_target: int = 0
+    breakdown: dict = field(default_factory=dict)  # milliseconds per swapped frame, by step
 
     def to_json(self) -> dict:
-        return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in self.__dict__.items()}
+        out = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in self.__dict__.items()}
+        out["breakdown"] = {k: round(v, 1) for k, v in self.breakdown.items()}
+        return out
 
 
 @dataclass
@@ -123,6 +126,8 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
     depth = max(2, min(8, int(400e6 // max(info.frame_bytes, 1))))
     timing = _Timing()
     last_report = [0.0]
+    engine_start = dict(getattr(engine, "timings", {}))
+    waits = {"reading video": 0.0, "saving video": 0.0}
 
     def report(force: bool = False) -> None:
         now = time.time()
@@ -162,7 +167,9 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
     def put(frame: np.ndarray) -> None:
         if writer_error:
             raise writer_error[0]
+        t0 = time.perf_counter()
         out_q.put(frame)
+        waits["saving video"] += time.perf_counter() - t0
 
     try:
         for r_start, r_end in ranges:
@@ -191,7 +198,9 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
                 for offset in range(r_end - r_start):
                     if cancel.is_set():
                         raise Cancelled()
+                    t_wait = time.perf_counter()
                     frame = in_q.get()
+                    waits["reading video"] += time.perf_counter() - t_wait
                     if frame is None:
                         err = reader.error_text()
                         raise VideoError(f"Video ended early at frame {r_start + offset}. {err}".strip())
@@ -252,6 +261,15 @@ def render(req: RenderRequest, engine, on_progress: Callable[[RenderStats], None
         writer.abort()
         tmp.unlink(missing_ok=True)
         raise
+    # Where the time went, per swapped frame (waits are spread over the whole render).
+    n = max(1, stats.frames_swapped)
+    for step, total in getattr(engine, "timings", {}).items():
+        spent = total - engine_start.get(step, 0.0)
+        if spent > 0:
+            stats.breakdown[step] = spent * 1000 / n
+    for step, total in waits.items():
+        if total > 0.05:
+            stats.breakdown[step] = total * 1000 / n
     report(force=True)
     stats.eta_seconds = 0.0
     return stats
