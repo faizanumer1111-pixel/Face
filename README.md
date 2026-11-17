@@ -2,17 +2,17 @@
 
 Put yourself in the ad. Drop in a photo of your face and an ad video, pick the person in the
 video you're replacing, choose the part of the video you want, and render it at one of three
-quality levels.
+quality levels. Bring up to four faces to replace several people in the same video.
 
 ## What you can do
 
 | | |
 |---|---|
-| **Your face** | Drop 1 to 5 photos, or take one with your camera. Several angles are averaged into one identity for a closer likeness. Photos of someone else are spotted and left out. |
+| **Your faces** | Drop 1 to 5 photos, or take one with your camera. Several angles are averaged into one identity for a closer likeness, and a photo of someone else is spotted and left out. **Add another face** (up to 4: Face A to D) to swap several people at once. |
 | **Pick the section** | Drag the green in/out handles on the filmstrip, or press `I` and `O` at the playhead. Only that section is rendered, and its audio is kept. |
-| **Pick the person** | **Find people** scans the section and lists everyone in it with how much of the section they're on screen. Click the one you're replacing; green ticks on the timeline show where they appear. Only that person is swapped. **Every face** is there too. |
+| **Pick who gets replaced** | **Find people** scans the section and lists everyone in it with how much of the section they're on screen. Click the person your face replaces; ticks on the timeline show where they appear. With several faces, choose Face A, B... and click the person each one replaces. Each face has its own colour so you can see who goes where, and a person can only be given one face. Everyone else is left alone. **Every face** is available when you use a single face. |
 | **Preview a frame** | Swaps the frame under the playhead in a few seconds and shows a draggable before/after split, before you spend time on a render. |
-| **Render** | Shows each GPU's progress, a live frame from the render, time left, and how much of the section your face was found in. |
+| **Render** | Shows each GPU's progress, a live frame from the render, time left, and how much of the section each face was placed in. |
 | **Compare and download** | A slider over the playing result shows the original underneath. Every render is kept as a take so you can compare Fast against Premium. |
 | **VR** | Tick *VR side-by-side* for 180/360 stereo footage; each eye is swapped and tracked separately. |
 

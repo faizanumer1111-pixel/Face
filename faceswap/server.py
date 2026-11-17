@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from . import pipeline as P
-from .config import MAX_SOURCE_PHOTOS, TIERS
+from .config import FACE_SLOTS, MAX_SOURCE_PHOTOS, TIERS
 from .jobs import JobStore, NotFound
 from .media import MediaError, frame_jpeg, probe
 
@@ -70,7 +70,7 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
     @app.get("/api/config")
     def config():
         return {"tiers": [t.public() for t in TIERS.values()], "backend": backend.name,
-                "accelerator": backend.accelerator, "max_photos": MAX_SOURCE_PHOTOS,
+                "accelerator": backend.accelerator, "max_photos": MAX_SOURCE_PHOTOS, "face_slots": FACE_SLOTS,
                 "parallel": backend.max_chunks, "max_seconds": MAX_DURATION}
 
     @app.post("/api/warm")
@@ -109,16 +109,23 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
         await run_in_threadpool(backend.persist)
         return meta
 
-    @app.post("/api/jobs/{jid}/faces")
-    async def upload_faces(jid: str, files: list[UploadFile] = File(...)):
-        d = store.job_dir(jid) / "faces"
+    @app.post("/api/jobs/{jid}/faces/{slot}")
+    async def upload_faces(jid: str, slot: str, files: list[UploadFile] = File(...)):
+        """Replace the photos for one face (A-D) and check them."""
+        d = store.face_dir(jid, slot)
         shutil.rmtree(d, ignore_errors=True)
-        d.mkdir()
+        d.mkdir(parents=True)
         for i, f in enumerate(files[:MAX_SOURCE_PHOTOS]):
             ext = Path(f.filename or "").suffix.lower()
             (d / f"{i}{ext if ext in IMAGE_EXTS else '.jpg'}").write_bytes(await f.read())
         await run_in_threadpool(backend.persist)
-        return await run_in_threadpool(task, "faces", jid)
+        return await run_in_threadpool(task, "faces", jid, slot)
+
+    @app.delete("/api/jobs/{jid}/faces/{slot}")
+    def remove_face(jid: str, slot: str):
+        P.clear_face(store, jid, slot)
+        backend.persist()
+        return {"ok": True}
 
     @app.post("/api/jobs/{jid}/scan")
     def scan(jid: str, body: dict):
@@ -128,9 +135,8 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
     @app.post("/api/jobs/{jid}/preview")
     def preview(jid: str, body: dict):
         need_video(jid)
-        P.RenderRequest.parse(body)  # validates tier
-        return task("preview", jid, float(body.get("t", 0)), body.get("person"),
-                    body.get("tier", "fast"), bool(body.get("vr", False)))
+        req = P.RenderRequest.parse(body)  # validates tier and cast
+        return task("preview", jid, float(body.get("t", 0)), req.cast, req.tier, req.vr)
 
     @app.get("/api/tasks/{token}")
     def poll(token: str):

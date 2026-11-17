@@ -73,4 +73,5 @@ def get_tier(key: str) -> Tier:
 MATCH_THRESHOLD = 0.28      # face counts as the chosen person above this
 TRACK_THRESHOLD = 0.12      # ...or above this when it overlaps where the person just was
 CLUSTER_THRESHOLD = 0.42    # scan: faces above this join the same person
-MAX_SOURCE_PHOTOS = 5
+MAX_SOURCE_PHOTOS = 5          # photos per face
+FACE_SLOTS = "abcd"            # up to 4 different faces in one render (Face A-D)

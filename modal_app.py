@@ -81,11 +81,11 @@ class Worker:
         return self.engine.gpu
 
     @modal.method()
-    def faces(self, jid: str) -> dict:
+    def faces(self, jid: str, slot: str) -> dict:
         from faceswap import pipeline as P
 
         volume.reload()
-        out = P.analyze_faces(self.engine, self.store, jid)
+        out = P.analyze_faces(self.engine, self.store, jid, slot)
         volume.commit()
         return out
 
@@ -99,11 +99,11 @@ class Worker:
         return out
 
     @modal.method()
-    def preview(self, jid: str, t: float, person, tier: str, vr: bool) -> dict:
+    def preview(self, jid: str, t: float, cast: list, tier: str, vr: bool) -> dict:
         from faceswap import pipeline as P
 
         volume.reload()
-        return P.preview(self.engine, self.store, jid, t, person, tier, vr)
+        return P.preview(self.engine, self.store, jid, t, cast, tier, vr)
 
     @modal.method()
     def render_chunk(self, rid: str, chunk: dict, req: dict) -> str:

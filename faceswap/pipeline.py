@@ -16,24 +16,54 @@ from dataclasses import asdict, dataclass
 import cv2
 import numpy as np
 
-from .config import CLUSTER_THRESHOLD, MAX_SOURCE_PHOTOS, get_tier
-from .engine import FaceEngine, FrameSwapper
+from .config import CLUSTER_THRESHOLD, FACE_SLOTS, MAX_SOURCE_PHOTOS, get_tier
+from .engine import FaceEngine, FrameSwapper, Role
 from .jobs import JobStore
 from .media import FrameReader, FrameWriter, concat_and_mux, grab_frame, jpeg
+
+
+def parse_cast(d: dict) -> list[dict]:
+    """Who replaces whom: [{"face": "a", "person": "p1"}, {"face": "b", "person": "p3"}].
+    `person` may be "all" (every face) only when a single face is used."""
+    cast = d.get("cast")
+    if cast is None:  # single-face shorthand
+        cast = [{"face": d.get("face", "a"), "person": d.get("person")}]
+    if not isinstance(cast, list) or not cast:
+        raise ValueError("Pick who to replace.")
+    if len(cast) > len(FACE_SLOTS):
+        raise ValueError(f"Up to {len(FACE_SLOTS)} faces can be swapped in one render.")
+    out, faces, people = [], set(), set()
+    for c in cast:
+        face, person = str(c.get("face", "")), c.get("person") or None
+        if face not in FACE_SLOTS or len(face) != 1:
+            raise ValueError(f"Unknown face '{face}'.")
+        label = f"Face {face.upper()}"
+        if person is None:
+            raise ValueError(f"Pick who {label} replaces.")
+        if face in faces:
+            raise ValueError(f"{label} is listed twice.")
+        if person in people:
+            raise ValueError("Two faces are set to replace the same person. Give each face its own person.")
+        if person == "all" and len(cast) > 1:
+            raise ValueError("'Every face' only works with a single face. Remove the other faces or pick people.")
+        faces.add(face)
+        people.add(person)
+        out.append({"face": face, "person": person})
+    return out
 
 
 @dataclass
 class RenderRequest:
     start: float
     end: float
-    person: str | None = None   # person id from the scan, or None/"all" for every face
+    cast: list            # see parse_cast
     tier: str = "fast"
     vr: bool = False
 
     @classmethod
     def parse(cls, d: dict) -> "RenderRequest":
         get_tier(d.get("tier", "fast"))
-        return cls(start=float(d.get("start", 0)), end=float(d.get("end", 0)), person=d.get("person"),
+        return cls(start=float(d.get("start", 0)), end=float(d.get("end", 0)), cast=parse_cast(d),
                    tier=d.get("tier", "fast"), vr=bool(d.get("vr", False)))
 
 
@@ -51,10 +81,11 @@ def face_thumb(img: np.ndarray, bbox, size: int = 192, scale: float = 1.7) -> st
     return data_url(jpeg(crop, quality=85))
 
 
-# ---------------------------------------------------------------- your face
-def analyze_faces(engine: FaceEngine, store: JobStore, jid: str) -> dict:
+# ---------------------------------------------------------------- the faces you bring
+def analyze_faces(engine: FaceEngine, store: JobStore, jid: str, slot: str = "a") -> dict:
+    """Check the photos for one face (A-D) and store its identity."""
     photos, embs = [], []
-    for p in store.face_paths(jid)[:MAX_SOURCE_PHOTOS]:
+    for p in store.face_paths(jid, slot)[:MAX_SOURCE_PHOTOS]:
         img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             photos.append({"name": p.name, "ok": False, "error": "Can't open this image. Use a JPG, PNG or WebP."})
@@ -73,19 +104,35 @@ def analyze_faces(engine: FaceEngine, store: JobStore, jid: str) -> dict:
         keep = []
         for ph, e in zip(ok_photos, embs):
             if float(e @ mean) < 0.35:
-                ph.update(ok=False, error="Looks like a different person from your other photos, so it was left out.")
+                ph.update(ok=False, error="Looks like a different person from the other photos of this face, "
+                                          "so it was left out.")
             else:
                 keep.append(e)
         embs = keep or embs[:1]
-    store.write_json(jid, "source.json", {"embeddings": [e.tolist() for e in embs]})
-    return {"photos": photos, "usable": len(embs)}
+    store.write_json(jid, f"source_{slot}.json", {"embeddings": [e.tolist() for e in embs]})
+    return {"face": slot, "photos": photos, "usable": len(embs)}
 
 
-def load_identity(engine: FaceEngine, store: JobStore, jid: str) -> np.ndarray:
-    embs = store.read_json(jid, "source.json", {"embeddings": []})["embeddings"]
+def clear_face(store: JobStore, jid: str, slot: str) -> None:
+    import shutil
+    shutil.rmtree(store.face_dir(jid, slot), ignore_errors=True)
+    (store.job_dir(jid) / f"source_{slot}.json").unlink(missing_ok=True)
+
+
+def face_embeddings(store: JobStore, jid: str, slot: str) -> list:
+    store.face_dir(jid, slot)  # validates the slot
+    return store.read_json(jid, f"source_{slot}.json", {"embeddings": []})["embeddings"]
+
+
+def load_identity(engine: FaceEngine, store: JobStore, jid: str, slot: str = "a") -> np.ndarray:
+    embs = face_embeddings(store, jid, slot)
     if not embs:
-        raise ValueError("Add a clear photo of your face first.")
+        raise ValueError(f"Add a clear photo for Face {slot.upper()} first.")
     return engine.source_latent([np.asarray(e, np.float32) for e in embs])
+
+
+def load_roles(engine: FaceEngine, store: JobStore, jid: str, cast: list[dict]) -> list[Role]:
+    return [Role(load_identity(engine, store, jid, c["face"]), load_target(store, jid, c["person"])) for c in cast]
 
 
 def load_target(store: JobStore, jid: str, person: str | None) -> np.ndarray | None:
@@ -150,19 +197,20 @@ def scan_people(engine: FaceEngine, store: JobStore, jid: str, start: float, end
 
 
 # ---------------------------------------------------------------- single-frame preview
-def preview(engine: FaceEngine, store: JobStore, jid: str, t: float, person: str | None,
+def preview(engine: FaceEngine, store: JobStore, jid: str, t: float, cast: list[dict],
             tier_key: str, vr: bool) -> dict:
     tier = get_tier(tier_key)
-    latent, target = load_identity(engine, store, jid), load_target(store, jid, person)
+    roles = load_roles(engine, store, jid, cast)
     src, meta = str(store.video_path(jid)), store.read_json(jid, "meta.json")
     frame = grab_frame(src, meta, t)
     before = jpeg(frame)
     t0 = time.time()
-    sw = FrameSwapper(engine, tier, latent, target, meta["fps"], vr)
+    sw = FrameSwapper(engine, tier, roles, meta["fps"], vr)
     analysis = sw.analyze(frame)
     out, swapped = sw.apply(frame, analysis, 0)
     return {"before": data_url(before), "after": data_url(jpeg(out)), "t": t,
-            "faces": sum(len(a) for a in analysis), "swapped": swapped,
+            "faces": sum(len(a) for a in analysis), "swapped": len(swapped),
+            "found": [c["face"] for r, c in enumerate(cast) if r in swapped],
             "ms": int((time.time() - t0) * 1000)}
 
 
@@ -190,18 +238,24 @@ def render_chunk(engine: FaceEngine, store: JobStore, rid: str, chunk: dict, req
     jid = rid.split("-")[0]
     tier = get_tier(req.tier)
     src, meta = str(store.video_path(jid)), store.read_json(jid, "meta.json")
-    latent, target = load_identity(engine, store, jid), load_target(store, jid, req.person)
+    roles = load_roles(engine, store, jid, req.cast)
     out_path = chunk_path(store, rid, chunk["index"])
     key = f"render:{rid}:chunk:{chunk['index']}"
     count = chunk["count"]
 
-    swapper = FrameSwapper(engine, tier, latent, target, meta["fps"], req.vr)
+    swapper = FrameSwapper(engine, tier, roles, meta["fps"], req.vr)
     reader = FrameReader(src, meta, chunk["start_frame"], count)
     writer = FrameWriter(out_path, meta, tier.crf, tier.preset)
     workers = 3 if engine.gpu else 1
     started = time.time()
     last_report, last_live, done, hits = 0.0, 0.0, 0, 0
-    progress.put(key, {"done": 0, "total": count, "swapped": 0, "started": started, "updated": started})
+    role_hits = [0] * len(roles)  # frames each of your faces was placed in
+
+    def report(**extra):
+        progress.put(key, {"done": done, "total": count, "swapped": hits, "roles": role_hits,
+                           "started": started, "updated": time.time(), **extra})
+
+    report()
     try:
         with ThreadPoolExecutor(workers) as pool:
             frames = iter(reader)
@@ -217,23 +271,23 @@ def render_chunk(engine: FaceEngine, store: JobStore, rid: str, chunk: dict, req
             while pending:
                 frame, fut = pending.popleft()
                 feed()
-                out, k = swapper.apply(frame, fut.result(), done)
+                out, placed = swapper.apply(frame, fut.result(), done)
                 writer.write(out)
                 done += 1
-                hits += 1 if k else 0
+                hits += 1 if placed else 0
+                for r in set(placed):
+                    role_hits[r] += 1
                 now = time.time()
                 if now - last_report > 0.75:
                     last_report = now
-                    progress.put(key, {"done": done, "total": count, "swapped": hits,
-                                       "started": started, "updated": now})
+                    report()
                 if now - last_live > 2.0:
                     last_live = now
                     progress.put(f"render:{rid}:live", jpeg(out, max_w=640, quality=72))
     finally:
         reader.close()
         writer.close()
-    progress.put(key, {"done": done, "total": count, "swapped": hits, "started": started,
-                       "updated": time.time(), "finished": True})
+    report(finished=True)
     return out_path
 
 
@@ -259,9 +313,10 @@ def start_state(rid: str, req: RenderRequest, plan: dict) -> dict:
 
 
 def validate_request(store: JobStore, jid: str, req: RenderRequest) -> None:
-    if not store.read_json(jid, "source.json", {"embeddings": []})["embeddings"]:
-        raise ValueError("Add a clear photo of your face first.")
-    load_target(store, jid, req.person)
+    for c in req.cast:
+        if not face_embeddings(store, jid, c["face"]):
+            raise ValueError(f"Add a clear photo for Face {c['face'].upper()} first.")
+        load_target(store, jid, c["person"])
 
 
 def run_render(store: JobStore, progress, rid: str, req: RenderRequest, plan: dict, run_chunks,
@@ -294,7 +349,7 @@ def render_status(progress, rid: str) -> dict | None:
     for i, size in enumerate(st["chunk_sizes"]):
         c = progress.get(f"render:{rid}:chunk:{i}") or {}
         lanes.append({"done": min(c.get("done", 0), size), "total": size, "active": "started" in c,
-                      "started": c.get("started"), "swapped": c.get("swapped", 0)})
+                      "started": c.get("started"), "swapped": c.get("swapped", 0), "roles": c.get("roles", [])})
     done = sum(l["done"] for l in lanes)
     total = max(1, st["frames_total"])
     starts = [l["started"] for l in lanes if l["started"]]
@@ -303,6 +358,8 @@ def render_status(progress, rid: str) -> dict | None:
         rate = done / max(now - min(starts), 1e-3)
         eta = (total - done) / rate
     swapped = sum(l["swapped"] for l in lanes)
+    cast = st["request"]["cast"]
+    role_frames = [sum(l["roles"][r] for l in lanes if len(l["roles"]) > r) for r in range(len(cast))]
     end = st.get("finished", now)
     return {
         "state": st["state"], "error": st.get("error"), "request": st["request"],
@@ -310,4 +367,6 @@ def render_status(progress, rid: str) -> dict | None:
         "eta": eta, "elapsed": end - st["created"], "duration": st["duration"],
         "lanes": [{"done": l["done"], "total": l["total"], "active": l["active"]} for l in lanes],
         "face_coverage": (swapped / done) if done else None, "size": st.get("size"),
+        "role_coverage": [{"face": c["face"], "coverage": (f / done) if done else None}
+                          for c, f in zip(cast, role_frames)],
     }

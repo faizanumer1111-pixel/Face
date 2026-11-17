@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -138,40 +138,36 @@ class OneEuro:
 @dataclass
 class TargetTrack:
     """Follows one chosen person through the shot."""
-    target: np.ndarray | None          # None -> swap every face
+    target: np.ndarray                 # ArcFace centroid of the person in the video
     smoothing: float
     fps: float
     last_bbox: np.ndarray | None = None
     last_idx: int = -10_000
     filt: OneEuro | None = None
-    hits: int = field(default=0)
 
-    def pick(self, faces: list[Face], idx: int) -> list[tuple[Face, np.ndarray]]:
-        if self.target is None:
-            return [(f, f.kps) for f in faces]
-        recent = idx - self.last_idx <= max(3, int(self.fps * 0.25))
-        best, best_score = None, -1e9
-        for f in faces:
-            sim = float(f.emb @ self.target) if f.emb is not None else 0.0
-            ov = iou(f.bbox, self.last_bbox) if recent else 0.0
-            ok = sim >= MATCH_THRESHOLD or (ov >= 0.35 and sim >= TRACK_THRESHOLD)
-            if ok:
-                score = sim + 0.25 * ov
-                if score > best_score:
-                    best, best_score = f, score
-        if best is None:
-            return []
-        if not recent:
+    def _recent(self, idx: int) -> bool:
+        return idx - self.last_idx <= max(3, int(self.fps * 0.25))
+
+    def score(self, f: Face, idx: int) -> float | None:
+        """How well `f` matches this person (None = not them). Overlap with where the
+        person just was keeps the lock through profile turns, blur and partial occlusion."""
+        sim = float(f.emb @ self.target) if f.emb is not None else 0.0
+        ov = iou(f.bbox, self.last_bbox) if self._recent(idx) else 0.0
+        if sim >= MATCH_THRESHOLD or (ov >= 0.35 and sim >= TRACK_THRESHOLD):
+            return sim + 0.25 * ov
+        return None
+
+    def commit(self, f: Face, idx: int) -> np.ndarray:
+        """Record that `f` is this person in frame `idx`; returns smoothed landmarks."""
+        if not self._recent(idx):
             self.filt = None
-        self.last_bbox, self.last_idx = best.bbox, idx
-        self.hits += 1
-        kps = best.kps
-        if self.smoothing > 0:
-            if self.filt is None:
-                # beta scales with face size so fast moves stay locked on
-                self.filt = OneEuro(self.smoothing, beta=6.0 / max(best.size, 16.0))
-            kps = self.filt(best.kps.astype(np.float64), 1.0 / self.fps).astype(np.float32)
-        return [(best, kps)]
+        self.last_bbox, self.last_idx = f.bbox, idx
+        if self.smoothing <= 0:
+            return f.kps
+        if self.filt is None:
+            # beta scales with face size so fast moves stay locked on
+            self.filt = OneEuro(self.smoothing, beta=6.0 / max(f.size, 16.0))
+        return self.filt(f.kps.astype(np.float64), 1.0 / self.fps).astype(np.float32)
 
 
 class FaceEngine:
@@ -341,22 +337,34 @@ class FaceEngine:
         return frame
 
 
+@dataclass
+class Role:
+    """One face from the user's photos and the person in the video it replaces."""
+    latent: np.ndarray              # identity to apply
+    target: np.ndarray | None       # person to replace; None = every face (only valid alone)
+
+
 class FrameSwapper:
-    """Per-render state: which person to follow, the identity to apply, the tier.
+    """Per-render state: who replaces whom, and the tier.
 
     `analyze` is stateless (safe to run on many frames in parallel);
     `apply` must be called in frame order because tracking/smoothing carry over.
     """
 
-    def __init__(self, engine: FaceEngine, tier: Tier, latent: np.ndarray, target: np.ndarray | None,
-                 fps: float, vr_sbs: bool = False):
-        self.engine, self.tier, self.latent, self.vr = engine, tier, latent, vr_sbs
+    def __init__(self, engine: FaceEngine, tier: Tier, roles: list[Role], fps: float, vr_sbs: bool = False):
+        if not roles:
+            raise ValueError("Pick at least one person to replace.")
+        if len(roles) > 1 and any(r.target is None for r in roles):
+            raise ValueError("'Every face' can only be used with a single face.")
+        self.engine, self.tier, self.roles, self.vr = engine, tier, roles, vr_sbs
+        self.every_face = roles[0].target is None
         halves = 2 if vr_sbs else 1
-        self.tracks = [TargetTrack(target, tier.smoothing, fps) for _ in range(halves)]
+        self.tracks = [[TargetTrack(r.target, tier.smoothing, fps) for r in roles] if not self.every_face else []
+                       for _ in range(halves)]
         engine.warm(tier)
 
     def analyze(self, frame: np.ndarray) -> list[list[Face]]:
-        embed = self.tracks[0].target is not None
+        embed = not self.every_face
         if not self.vr:
             return [self.engine.detect(frame, self.tier.det_size, embed=embed)]
         half = frame.shape[1] // 2
@@ -364,10 +372,27 @@ class FrameSwapper:
                 [f.offset(half) for f in
                  self.engine.detect(np.ascontiguousarray(frame[:, half:]), self.tier.det_size, embed=embed)]]
 
-    def apply(self, frame: np.ndarray, analysis: list[list[Face]], idx: int) -> tuple[np.ndarray, int]:
-        swapped = 0
-        for track, faces in zip(self.tracks, analysis):
-            for face, kps in track.pick(faces, idx):
-                self.engine.swap_face(frame, kps, self.latent, self.tier)
-                swapped += 1
+    def apply(self, frame: np.ndarray, analysis: list[list[Face]], idx: int) -> tuple[np.ndarray, list[int]]:
+        """Swap the frame in place. Returns the role index of every face swapped."""
+        swapped: list[int] = []
+        for half, faces in enumerate(analysis):
+            if self.every_face:
+                for f in faces:
+                    self.engine.swap_face(frame, f.kps, self.roles[0].latent, self.tier)
+                    swapped.append(0)
+                continue
+            # Assign faces to people jointly: best match first, each face and person used once,
+            # so two of your faces can never land on the same person.
+            tracks = self.tracks[half]
+            cands = sorted(((s, r, i) for r, tr in enumerate(tracks) for i, f in enumerate(faces)
+                            if (s := tr.score(f, idx)) is not None), reverse=True)
+            used_r, used_f = set(), set()
+            for _, r, i in cands:
+                if r in used_r or i in used_f:
+                    continue
+                used_r.add(r)
+                used_f.add(i)
+                kps = tracks[r].commit(faces[i], idx)
+                self.engine.swap_face(frame, kps, self.roles[r].latent, self.tier)
+                swapped.append(r)
         return frame, swapped

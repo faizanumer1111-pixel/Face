@@ -1,6 +1,6 @@
 """On-disk job storage and render progress tracking.
 
-Layout:  <root>/<job_id>/input.<ext>, meta.json, faces/*.jpg, source.json, people.json,
+Layout:  <root>/<job_id>/input.<ext>, meta.json, faces/<a-d>/*.jpg, source_<a-d>.json, people.json,
          <root>/<job_id>/renders/<render_id>/chunk_000.mp4 ... final.mp4
 """
 from __future__ import annotations
@@ -12,6 +12,8 @@ import threading
 import time
 import uuid
 from pathlib import Path
+
+from .config import FACE_SLOTS
 
 JOB_RE = re.compile(r"^[a-f0-9]{12}$")
 RENDER_RE = re.compile(r"^([a-f0-9]{12})-([a-f0-9]{6})$")
@@ -57,8 +59,13 @@ class JobStore:
             return p
         raise NotFound("video")
 
-    def face_paths(self, jid: str) -> list[Path]:
-        return sorted((self.job_dir(jid) / "faces").glob("*.*"))
+    def face_dir(self, jid: str, slot: str) -> Path:
+        if slot not in FACE_SLOTS or len(slot) != 1:
+            raise ValueError(f"Unknown face '{slot}'.")
+        return self.job_dir(jid) / "faces" / slot
+
+    def face_paths(self, jid: str, slot: str) -> list[Path]:
+        return sorted(self.face_dir(jid, slot).glob("*.*"))
 
     def read_json(self, jid: str, name: str, default=None):
         p = self.job_dir(jid) / name

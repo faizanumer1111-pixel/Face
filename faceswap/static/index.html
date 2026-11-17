@@ -22,23 +22,13 @@
   </header>
 
   <main class="studio">
-    <!-- 1. Your face -->
+    <!-- 1. Faces -->
     <section class="rail rail-left" aria-labelledby="h-face">
-      <h2 id="h-face"><span class="step">1</span>Your face</h2>
-      <label class="key-surface face-drop" id="faceDrop" tabindex="0">
-        <input type="file" id="faceInput" accept="image/*" multiple hidden>
-        <span class="marker tl"></span><span class="marker tr"></span><span class="marker bl"></span><span class="marker br"></span>
-        <span class="key-copy">
-          <strong>Drop a photo of your face</strong>
-          <span>or click to choose one</span>
-        </span>
-      </label>
-      <ul class="face-list" id="faceList" aria-live="polite"></ul>
-      <div class="face-actions">
-        <button type="button" class="btn ghost" id="addFaceBtn">Add another angle</button>
-        <button type="button" class="btn ghost" id="cameraBtn">Use camera</button>
-      </div>
-      <p class="hint">Clear, front-facing, good light. Up to 5 photos from different angles give a closer likeness.</p>
+      <h2 id="h-face"><span class="step">1</span>Faces</h2>
+      <input type="file" id="faceInput" accept="image/*" multiple hidden>
+      <div class="face-sets" id="faceSets"></div>
+      <button type="button" class="btn add-set" id="addSetBtn">Add another face</button>
+      <p class="hint">Clear, front-facing, good light. Up to 5 photos of each face, from different angles, give a closer likeness. Add another face to swap more than one person.</p>
     </section>
 
     <!-- 2 + 3. Video, section, person -->
@@ -107,11 +97,15 @@
 
       <div class="people" aria-labelledby="h-people">
         <div class="people-head">
-          <h2 id="h-people"><span class="step">3</span>Who are you replacing?</h2>
+          <h2 id="h-people"><span class="step">3</span>Who gets replaced?</h2>
           <button type="button" class="btn" id="scanBtn" disabled>Find people</button>
         </div>
-        <ul class="cast" id="cast" role="radiogroup" aria-labelledby="h-people">
-          <li class="cast-empty">Find the people in your section, then pick the one you're replacing.</li>
+        <div class="assign-bar" id="assignBar" hidden>
+          <span class="assign-label" id="assignLabel">Choose a face, then click the person it replaces.</span>
+          <div class="assign-chips" id="assignChips" role="radiogroup" aria-labelledby="assignLabel"></div>
+        </div>
+        <ul class="cast" id="cast" aria-labelledby="h-people">
+          <li class="cast-empty">Find the people in your section, then pick who gets replaced.</li>
         </ul>
       </div>
     </section>
