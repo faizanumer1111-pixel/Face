@@ -1,0 +1,13 @@
+# Local run (python run_local.py). For Modal, only `modal` is needed on your machine.
+#
+# insightface must be built without build isolation, so install it first:
+#   pip install numpy cython
+#   pip install --no-build-isolation insightface==0.7.3
+#   pip install -r requirements.txt
+numpy
+opencv-python-headless
+onnxruntime            # CPU. With an NVIDIA GPU use onnxruntime-gpu instead (not both).
+fastapi
+uvicorn[standard]
+python-multipart
+modal                  # only needed to deploy to Modal

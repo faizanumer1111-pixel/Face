@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Lead Role</title>
+  <meta name="description" content="Put yourself in the ad: swap your face onto a chosen person in your ad footage.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2300B140'/%3E%3Cpath d='M16 7v18M7 16h18' stroke='%2303210F' stroke-width='3'/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <h1>Lead Role</h1>
+      <p class="tagline">Put yourself in the ad.</p>
+    </div>
+    <p class="runtime" id="runtime" title="Where the face work runs"></p>
+  </header>
+
+  <main class="studio">
+    <!-- 1. Your face -->
+    <section class="rail rail-left" aria-labelledby="h-face">
+      <h2 id="h-face"><span class="step">1</span>Your face</h2>
+      <label class="key-surface face-drop" id="faceDrop" tabindex="0">
+        <input type="file" id="faceInput" accept="image/*" multiple hidden>
+        <span class="marker tl"></span><span class="marker tr"></span><span class="marker bl"></span><span class="marker br"></span>
+        <span class="key-copy">
+          <strong>Drop a photo of your face</strong>
+          <span>or click to choose one</span>
+        </span>
+      </label>
+      <ul class="face-list" id="faceList" aria-live="polite"></ul>
+      <div class="face-actions">
+        <button type="button" class="btn ghost" id="addFaceBtn">Add another angle</button>
+        <button type="button" class="btn ghost" id="cameraBtn">Use camera</button>
+      </div>
+      <p class="hint">Clear, front-facing, good light. Up to 5 photos from different angles give a closer likeness.</p>
+    </section>
+
+    <!-- 2 + 3. Video, section, person -->
+    <section class="center" aria-labelledby="h-video">
+      <h2 id="h-video" class="sr-only">Ad video</h2>
+      <div class="stage" id="stage">
+        <label class="key-surface video-drop" id="videoDrop" tabindex="0">
+          <input type="file" id="videoInput" accept="video/*,.mov,.mkv" hidden>
+          <span class="marker tl"></span><span class="marker tr"></span><span class="marker bl"></span><span class="marker br"></span>
+          <span class="marker ml"></span><span class="marker mr"></span>
+          <span class="key-copy big">
+            <span class="step on-key">2</span>
+            <strong>Drop the ad video here</strong>
+            <span>MP4 or MOV, up to 20 minutes</span>
+          </span>
+        </label>
+        <video id="video" playsinline preload="auto" hidden></video>
+        <img id="posterFallback" alt="" hidden>
+        <video id="compareVideo" class="compare-layer" playsinline muted preload="auto" hidden></video>
+        <div class="split" id="split" hidden>
+          <img id="splitBefore" alt="Original frame">
+          <img id="splitAfter" alt="Frame with your face">
+          <div class="split-handle" id="splitHandle" role="slider" tabindex="0" aria-label="Before and after divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></div>
+          <span class="split-tag left">Original</span><span class="split-tag right">You</span>
+        </div>
+        <div class="compare-handle" id="compareHandle" role="slider" tabindex="0" aria-label="Original and render divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden></div>
+        <div class="stage-badges">
+          <span class="badge" id="stageBadge" hidden></span>
+          <button type="button" class="badge-btn" id="stageClose" hidden>Back to video</button>
+        </div>
+        <div class="upload-line" id="uploadLine" hidden><span></span></div>
+      </div>
+
+      <div class="transport" id="transport" aria-disabled="true">
+        <button type="button" class="icon-btn" id="playBtn" aria-label="Play" title="Play or pause (Space)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M7 5l12 7-12 7z"/><path class="i-pause" d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+        </button>
+        <button type="button" class="icon-btn" id="stepBack" aria-label="Previous frame" title="Previous frame (Left arrow)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+        <button type="button" class="icon-btn" id="stepFwd" aria-label="Next frame" title="Next frame (Right arrow)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+        <span class="timecode"><span id="tcNow">00:00.00</span><span class="tc-sep">/</span><span id="tcDur">00:00.00</span></span>
+        <span class="spacer"></span>
+        <span class="mark-group">
+        <button type="button" class="chip-btn" id="markIn" title="Set the section start at the playhead (I)">Set in</button>
+        <button type="button" class="chip-btn" id="markOut" title="Set the section end at the playhead (O)">Set out</button>
+        <label class="toggle small" title="Loop playback inside the section">
+          <input type="checkbox" id="loopSel" checked><span>Loop section</span>
+        </label>
+        </span>
+      </div>
+
+      <div class="timeline empty" id="timeline" aria-label="Section of the video to render">
+        <canvas id="filmstrip" class="filmstrip"></canvas>
+        <div class="appear-track" id="appearTrack" aria-hidden="true"></div>
+        <div class="mask left" id="maskL"></div><div class="mask right" id="maskR"></div>
+        <div class="sel" id="sel">
+          <div class="handle in" id="hIn" role="slider" tabindex="0" aria-label="Section start"></div>
+          <div class="handle out" id="hOut" role="slider" tabindex="0" aria-label="Section end"></div>
+        </div>
+        <div class="playhead" id="playhead"></div>
+      </div>
+      <p class="section-readout" id="selReadout">Drop a video to choose the section you want.</p>
+
+      <div class="people" aria-labelledby="h-people">
+        <div class="people-head">
+          <h2 id="h-people"><span class="step">3</span>Who are you replacing?</h2>
+          <button type="button" class="btn" id="scanBtn" disabled>Find people</button>
+        </div>
+        <ul class="cast" id="cast" role="radiogroup" aria-labelledby="h-people">
+          <li class="cast-empty">Find the people in your section, then pick the one you're replacing.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 4. Quality + render -->
+    <section class="rail rail-right" aria-labelledby="h-quality">
+      <h2 id="h-quality"><span class="step">4</span>Quality</h2>
+      <div class="tiers" id="tiers" role="radiogroup" aria-labelledby="h-quality"></div>
+
+      <label class="toggle">
+        <input type="checkbox" id="vrToggle"><span>VR side-by-side footage</span>
+      </label>
+      <p class="hint tight">For 180/360 stereo video. Each eye is swapped separately.</p>
+
+      <label class="consent">
+        <input type="checkbox" id="consent">
+        <span>I have permission to use every face in this render.</span>
+      </label>
+
+      <div class="actions">
+        <button type="button" class="btn" id="previewBtn" disabled title="Swap the frame under the playhead (P)">Preview frame</button>
+        <button type="button" class="btn primary" id="renderBtn" disabled>Render section</button>
+      </div>
+      <p class="why-disabled" id="whyDisabled" aria-live="polite"></p>
+
+      <div class="render-panel" id="renderPanel" hidden>
+        <div class="render-head">
+          <span class="tally" id="tally" aria-hidden="true"></span>
+          <strong id="renderTitle">Starting</strong>
+          <span class="render-pct" id="renderPct"></span>
+        </div>
+        <img class="live-frame" id="liveFrame" alt="Latest rendered frame" hidden>
+        <div class="lanes" id="lanes"></div>
+        <dl class="render-stats">
+          <div><dt>Frames</dt><dd id="stFrames">-</dd></div>
+          <div><dt>Elapsed</dt><dd id="stElapsed">-</dd></div>
+          <div><dt>Left</dt><dd id="stEta">-</dd></div>
+          <div><dt>Face found</dt><dd id="stCover">-</dd></div>
+        </dl>
+        <p class="render-msg" id="renderMsg"></p>
+        <div class="result-actions" id="resultActions" hidden>
+          <a class="btn primary" id="downloadBtn" href="#" download>Download MP4</a>
+          <button type="button" class="btn" id="compareBtn" aria-pressed="false">Compare with original</button>
+        </div>
+      </div>
+
+      <div class="takes" id="takesWrap" hidden>
+        <h3>Takes</h3>
+        <ol class="take-list" id="takes"></ol>
+      </div>
+    </section>
+  </main>
+
+  <div class="camera" id="camera" hidden role="dialog" aria-modal="true" aria-labelledby="h-camera">
+    <div class="camera-box">
+      <h2 id="h-camera">Take a photo</h2>
+      <div class="camera-view">
+        <video id="camVideo" playsinline muted autoplay></video>
+        <div class="camera-oval" aria-hidden="true"></div>
+      </div>
+      <p class="hint">Fit your face in the oval, look at the camera.</p>
+      <div class="actions">
+        <button type="button" class="btn" id="camCancel">Cancel</button>
+        <button type="button" class="btn primary" id="camShoot">Capture</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
