@@ -99,11 +99,11 @@ class Worker:
         return out
 
     @modal.method()
-    def preview(self, jid: str, t: float, cast: list, tier: str, vr: bool) -> dict:
+    def preview(self, jid: str, t: float, cast: list, tier: str, vr: bool, frame: dict | None = None) -> dict:
         from faceswap import pipeline as P
 
         volume.reload()
-        return P.preview(self.engine, self.store, jid, t, cast, tier, vr)
+        return P.preview(self.engine, self.store, jid, t, cast, tier, vr, frame)
 
     @modal.method()
     def render_chunk(self, rid: str, chunk: dict, req: dict) -> str:

@@ -143,9 +143,10 @@ class FrameReader:
 class FrameWriter:
     """Encodes BGR frames to H.264 on a background thread."""
 
-    def __init__(self, path: str, meta: dict, crf: int, preset: str):
+    def __init__(self, path: str, meta: dict, crf: int, preset: str, size: tuple[int, int] | None = None):
         self.path = path
-        cmd = BASE + ["-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{meta['width']}x{meta['height']}",
+        w, h = size or (meta["width"], meta["height"])
+        cmd = BASE + ["-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}",
                       "-r", meta["fps_str"], "-i", "-", "-an",
                       "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                       "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p",

@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import pipeline as P
 from .config import FACE_SLOTS, MAX_SOURCE_PHOTOS, TIERS
+from .reframe import ASPECTS
 from .jobs import JobStore, NotFound
 from .media import MediaError, frame_jpeg, probe
 
@@ -71,7 +72,7 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
     def config():
         return {"tiers": [t.public() for t in TIERS.values()], "backend": backend.name,
                 "accelerator": backend.accelerator, "max_photos": MAX_SOURCE_PHOTOS, "face_slots": FACE_SLOTS,
-                "parallel": backend.max_chunks, "max_seconds": MAX_DURATION}
+                "parallel": backend.max_chunks, "max_seconds": MAX_DURATION, "aspects": list(ASPECTS)}
 
     @app.post("/api/warm")
     def warm():
@@ -136,7 +137,7 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
     def preview(jid: str, body: dict):
         need_video(jid)
         req = P.RenderRequest.parse(body)  # validates tier and cast
-        return task("preview", jid, float(body.get("t", 0)), req.cast, req.tier, req.vr)
+        return task("preview", jid, float(body.get("t", 0)), req.cast, req.tier, req.vr, req.frame)
 
     @app.get("/api/tasks/{token}")
     def poll(token: str):
@@ -160,7 +161,8 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
         backend.persist()
         backend.progress.put(f"render:{rid}", P.start_state(rid, req, plan))
         backend.start_render(rid, req, plan)
-        return {"render_id": rid, "lanes": len(plan["chunks"]), "frames": plan["frames_total"]}
+        return {"render_id": rid, "lanes": len(plan["chunks"]), "frames": plan["frames_total"],
+                "out_size": plan["out_size"]}
 
     @app.get("/api/renders/{rid}")
     def render_status(rid: str):

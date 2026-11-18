@@ -440,6 +440,23 @@ class FrameSwapper:
             out.append((r, i))
         return out
 
+    def focus(self, analysis: list[list[Face]], idx: int) -> np.ndarray | None:
+        """Where the camera should look this frame: the first face's person (or the largest face)."""
+        faces = analysis[0] if analysis else []
+        if self.every_face:
+            return max(faces, key=lambda f: f.size).bbox if faces else None
+        tr = self.tracks[0][0]
+        return tr.last_bbox if tr.last_idx == idx else None
+
+    def track_only(self, frame: np.ndarray, analysis: list[list[Face]], idx: int) -> None:
+        """Update tracking without swapping (used to warm up before a chunk starts)."""
+        if self.every_face:
+            return
+        for half, faces in enumerate(analysis):
+            tracks = self.tracks[half]
+            for r, i in self._assign(frame, faces, tracks, idx):
+                tracks[r].commit(faces[i], idx)
+
     def apply(self, frame: np.ndarray, analysis: list[list[Face]], idx: int) -> tuple[np.ndarray, list[int]]:
         """Swap the frame in place. Returns the role index of every face swapped."""
         swapped: list[int] = []

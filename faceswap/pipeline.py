@@ -20,6 +20,7 @@ from .config import CLUSTER_THRESHOLD, FACE_SLOTS, MAX_SOURCE_PHOTOS, get_tier
 from .engine import FaceEngine, FrameSwapper, Role
 from .jobs import JobStore
 from .media import FrameReader, FrameWriter, concat_and_mux, grab_frame, jpeg
+from .reframe import Reframer, crop_size, parse_frame
 
 
 def parse_cast(d: dict) -> list[dict]:
@@ -59,12 +60,18 @@ class RenderRequest:
     cast: list            # see parse_cast
     tier: str = "fast"
     vr: bool = False
+    frame: dict = None    # see reframe.parse_frame
+
+    def __post_init__(self):
+        self.frame = parse_frame(self.frame)
+        if self.vr and self.frame["aspect"] != "original":
+            raise ValueError("VR side-by-side footage can't be reframed. Set the format to Original.")
 
     @classmethod
     def parse(cls, d: dict) -> "RenderRequest":
         get_tier(d.get("tier", "fast"))
         return cls(start=float(d.get("start", 0)), end=float(d.get("end", 0)), cast=parse_cast(d),
-                   tier=d.get("tier", "fast"), vr=bool(d.get("vr", False)))
+                   tier=d.get("tier", "fast"), vr=bool(d.get("vr", False)), frame=d.get("frame"))
 
 
 def data_url(jpg: bytes) -> str:
@@ -198,19 +205,22 @@ def scan_people(engine: FaceEngine, store: JobStore, jid: str, start: float, end
 
 # ---------------------------------------------------------------- single-frame preview
 def preview(engine: FaceEngine, store: JobStore, jid: str, t: float, cast: list[dict],
-            tier_key: str, vr: bool) -> dict:
+            tier_key: str, vr: bool, frame_opts: dict | None = None) -> dict:
     tier = get_tier(tier_key)
     roles = load_roles(engine, store, jid, cast)
     src, meta = str(store.video_path(jid)), store.read_json(jid, "meta.json")
     frame = grab_frame(src, meta, t)
-    before = jpeg(frame)
+    original = frame.copy()
     t0 = time.time()
     sw = FrameSwapper(engine, tier, roles, meta["fps"], vr)
     analysis = sw.analyze(frame)
     out, swapped = sw.apply(frame, analysis, 0)
-    return {"before": data_url(before), "after": data_url(jpeg(out)), "t": t,
+    rf = Reframer(meta["width"], meta["height"], parse_frame(frame_opts), meta["fps"])
+    rf.observe(sw.focus(analysis, 0))
+    return {"before": data_url(jpeg(rf.apply(original))), "after": data_url(jpeg(rf.apply(out))), "t": t,
             "faces": sum(len(a) for a in analysis), "swapped": len(swapped),
             "found": [c["face"] for r, c in enumerate(cast) if r in swapped],
+            "crop": rf.public_rect() if rf.active else None,
             "ms": int((time.time() - t0) * 1000)}
 
 
@@ -227,7 +237,12 @@ def plan_render(store: JobStore, jid: str, req: RenderRequest, max_chunks: int |
     n = max(1, min(limit, math.ceil(total / (tier.min_chunk_seconds * fps))))
     bounds = [f0 + round(total * i / n) for i in range(n + 1)]
     chunks = [{"index": i, "start_frame": bounds[i], "count": bounds[i + 1] - bounds[i]} for i in range(n)]
-    return {"chunks": chunks, "frames_total": total, "start": f0 / fps, "duration": total / fps}
+    warm = int(round(fps * 1.0))
+    for c in chunks:
+        c["warm_frames"] = min(warm, c["start_frame"] - f0)
+    ow, oh = crop_size(meta["width"], meta["height"], req.frame["aspect"])
+    return {"chunks": chunks, "frames_total": total, "start": f0 / fps, "duration": total / fps,
+            "section_start_frame": f0, "out_size": [ow, oh]}
 
 
 def chunk_path(store: JobStore, rid: str, index: int) -> str:
@@ -244,8 +259,17 @@ def render_chunk(engine: FaceEngine, store: JobStore, rid: str, chunk: dict, req
     count = chunk["count"]
 
     swapper = FrameSwapper(engine, tier, roles, meta["fps"], req.vr)
+    reframer = Reframer(meta["width"], meta["height"], req.frame, meta["fps"])
+    if reframer.follow and chunk.get("warm_frames"):
+        # Let tracking and the camera settle on the frames just before this chunk, so chunks
+        # rendered on different machines line up where they meet.
+        warm = chunk["warm_frames"]
+        for k, f in enumerate(FrameReader(src, meta, chunk["start_frame"] - warm, warm)):
+            an = swapper.analyze(f)
+            swapper.track_only(f, an, k - warm)
+            reframer.observe(swapper.focus(an, k - warm))
     reader = FrameReader(src, meta, chunk["start_frame"], count)
-    writer = FrameWriter(out_path, meta, tier.crf, tier.preset)
+    writer = FrameWriter(out_path, meta, tier.crf, tier.preset, (reframer.cw, reframer.ch))
     workers = 3 if engine.accelerated else 0  # CPU: prefetch threads only fight over the same cores
     started = time.time()
     last_report, last_live, done, hits = 0.0, 0.0, 0, 0
@@ -273,6 +297,8 @@ def render_chunk(engine: FaceEngine, store: JobStore, rid: str, chunk: dict, req
                 feed()
                 analysis = fut.result() if fut else swapper.analyze(frame)
                 out, placed = swapper.apply(frame, analysis, done)
+                reframer.observe(swapper.focus(analysis, done))
+                out = reframer.apply(out)
                 writer.write(out)
                 done += 1
                 hits += 1 if placed else 0
