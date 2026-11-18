@@ -12,8 +12,27 @@ from fractions import Fraction
 import cv2
 import numpy as np
 
-FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
-FFPROBE = os.environ.get("FFPROBE", "ffprobe")
+import shutil as _shutil
+
+
+def _find_ffmpeg() -> tuple[str, str]:
+    """ffmpeg + ffprobe from PATH, or from the static-ffmpeg package (no Homebrew needed on a Mac)."""
+    ff, fp = os.environ.get("FFMPEG"), os.environ.get("FFPROBE")
+    if ff and fp:
+        return ff, fp
+    if _shutil.which("ffmpeg") and _shutil.which("ffprobe"):
+        return "ffmpeg", "ffprobe"
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+        if _shutil.which("ffmpeg") and _shutil.which("ffprobe"):
+            return "ffmpeg", "ffprobe"
+    except Exception:  # noqa: BLE001
+        pass
+    raise RuntimeError("ffmpeg was not found. Install it (brew install ffmpeg) or run: pip install static-ffmpeg")
+
+
+FFMPEG, FFPROBE = _find_ffmpeg()
 BASE = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin"]
 
 

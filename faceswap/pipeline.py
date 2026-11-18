@@ -246,7 +246,7 @@ def render_chunk(engine: FaceEngine, store: JobStore, rid: str, chunk: dict, req
     swapper = FrameSwapper(engine, tier, roles, meta["fps"], req.vr)
     reader = FrameReader(src, meta, chunk["start_frame"], count)
     writer = FrameWriter(out_path, meta, tier.crf, tier.preset)
-    workers = 3 if engine.gpu else 1
+    workers = 3 if engine.accelerated else 0  # CPU: prefetch threads only fight over the same cores
     started = time.time()
     last_report, last_live, done, hits = 0.0, 0.0, 0, 0
     role_hits = [0] * len(roles)  # frames each of your faces was placed in
@@ -257,21 +257,22 @@ def render_chunk(engine: FaceEngine, store: JobStore, rid: str, chunk: dict, req
 
     report()
     try:
-        with ThreadPoolExecutor(workers) as pool:
+        with ThreadPoolExecutor(max(workers, 1)) as pool:
             frames = iter(reader)
             pending: deque = deque()
 
             def feed():
                 f = next(frames, None)
                 if f is not None:
-                    pending.append((f, pool.submit(swapper.analyze, f)))
+                    pending.append((f, pool.submit(swapper.analyze, f) if workers else None))
 
-            for _ in range(workers * 2):
+            for _ in range(max(workers * 2, 1)):
                 feed()
             while pending:
                 frame, fut = pending.popleft()
                 feed()
-                out, placed = swapper.apply(frame, fut.result(), done)
+                analysis = fut.result() if fut else swapper.analyze(frame)
+                out, placed = swapper.apply(frame, analysis, done)
                 writer.write(out)
                 done += 1
                 hits += 1 if placed else 0

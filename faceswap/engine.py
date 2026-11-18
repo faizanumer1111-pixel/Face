@@ -145,8 +145,22 @@ class TargetTrack:
     last_idx: int = -10_000
     filt: OneEuro | None = None
 
+    verified_idx: int = -10_000
+
     def _recent(self, idx: int) -> bool:
         return idx - self.last_idx <= max(3, int(self.fps * 0.25))
+
+    def locked(self, faces: list[Face], idx: int) -> int | None:
+        """Index of the one face that clearly continues this track (by overlap alone), or None.
+        Lets us skip identity checks on most frames: they only run when the lock is lost,
+        when another face comes close, or periodically to re-verify."""
+        if not self._recent(idx) or self.last_bbox is None:
+            return None
+        ovs = [iou(f.bbox, self.last_bbox) for f in faces]
+        close = [i for i, o in enumerate(ovs) if o >= 0.2]
+        if len(close) == 1 and ovs[close[0]] >= 0.4:
+            return close[0]
+        return None
 
     def score(self, f: Face, idx: int) -> float | None:
         """How well `f` matches this person (None = not them). Overlap with where the
@@ -175,11 +189,18 @@ class FaceEngine:
         import onnxruntime as ort
         from insightface.model_zoo import get_model
 
+        avail = ort.get_available_providers()
         if providers is None:
-            avail = ort.get_available_providers()
-            providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in avail]
+            providers = []
+            if "CUDAExecutionProvider" in avail:
+                providers.append("CUDAExecutionProvider")
+            elif "CoreMLExecutionProvider" in avail and os.environ.get("LEADROLE_COREML", "1") != "0":
+                # Apple silicon: run on the GPU / Neural Engine. Ops CoreML can't take fall back to CPU.
+                providers.append(("CoreMLExecutionProvider", {"ModelFormat": "MLProgram", "MLComputeUnits": "ALL"}))
+            providers.append("CPUExecutionProvider")
         self.providers = providers
-        self.gpu = "CUDAExecutionProvider" in providers
+        names = [p if isinstance(p, str) else p[0] for p in providers]
+        self.gpu = "CUDAExecutionProvider" in names
         self.model_dir = model_dir
         ctx = 0 if self.gpu else -1
 
@@ -193,10 +214,16 @@ class FaceEngine:
         self.swap_in = [i.name for i in self.swap_sess.get_inputs()]
         self.swap_out = self.swap_sess.get_outputs()[0].name
         self.emap = swapper.emap.astype(np.float32)
-        # ONNX Runtime silently falls back to CPU if CUDA can't load - report what we really got
-        self.gpu = "CUDAExecutionProvider" in self.swap_sess.get_providers()
-        if "CUDAExecutionProvider" in providers and not self.gpu:
+        # ONNX Runtime silently falls back to CPU if an accelerator can't load - report what we really got
+        got = self.swap_sess.get_providers()
+        self.gpu = "CUDAExecutionProvider" in got
+        self.coreml = "CoreMLExecutionProvider" in got
+        self.accelerated = self.gpu or self.coreml
+        self.device = "GPU (CUDA)" if self.gpu else "Apple silicon (CoreML)" if self.coreml else "CPU"
+        if "CUDAExecutionProvider" in names and not self.gpu:
             print("WARNING: CUDA was requested but failed to load; running on CPU (much slower).", flush=True)
+        if "CoreMLExecutionProvider" in names and not self.coreml:
+            print("WARNING: CoreML was requested but failed to load; running on CPU.", flush=True)
         self._ort = ort
         self._lazy_lock = threading.Lock()
         self._gfpgan = None
@@ -239,13 +266,20 @@ class FaceEngine:
                  for b, k in zip(bboxes, kpss)]
         faces = [f for f in faces if f.size >= min_size]
         if embed and faces:
-            from insightface.utils import face_align
-            crops = [face_align.norm_crop(img, landmark=f.kps, image_size=112) for f in faces]
-            feats = self.rec.get_feat(crops)
-            feats = feats / np.linalg.norm(feats, axis=1, keepdims=True)
-            for f, e in zip(faces, feats):
-                f.emb = e.astype(np.float32)
+            self.embed(img, faces)
         return faces
+
+    def embed(self, img: np.ndarray, faces: list[Face]) -> None:
+        """Compute identity embeddings for the faces that don't have one yet (the slow part on CPU)."""
+        from insightface.utils import face_align
+        todo = [f for f in faces if f.emb is None]
+        if not todo:
+            return
+        crops = [face_align.norm_crop(img, landmark=f.kps, image_size=112) for f in todo]
+        feats = self.rec.get_feat(crops)
+        feats = feats / np.linalg.norm(feats, axis=1, keepdims=True)
+        for f, e in zip(todo, feats):
+            f.emb = e.astype(np.float32)
 
     def detect_source(self, img: np.ndarray) -> tuple[Face, np.ndarray] | tuple[None, None]:
         """Largest face in a user photo (and the canvas its coordinates refer to).
@@ -363,14 +397,48 @@ class FrameSwapper:
                        for _ in range(halves)]
         engine.warm(tier)
 
-    def analyze(self, frame: np.ndarray) -> list[list[Face]]:
-        embed = not self.every_face
+    def analyze(self, frame: np.ndarray, embed: bool | None = None) -> list[list[Face]]:
+        """Detect faces. With embed=True (GPU prefetch) identities are computed up front;
+        otherwise they are computed lazily in `apply`, only when tracking needs them."""
+        if embed is None:
+            embed = not self.every_face and self.engine.accelerated
         if not self.vr:
             return [self.engine.detect(frame, self.tier.det_size, embed=embed)]
         half = frame.shape[1] // 2
         return [self.engine.detect(np.ascontiguousarray(frame[:, :half]), self.tier.det_size, embed=embed),
                 [f.offset(half) for f in
                  self.engine.detect(np.ascontiguousarray(frame[:, half:]), self.tier.det_size, embed=embed)]]
+
+    VERIFY_EVERY = 12  # frames between identity re-checks on a locked track
+
+    def _assign(self, frame, faces, tracks, idx) -> list[tuple[int, int]]:
+        """(role, face index) pairs for this frame."""
+        if not faces:
+            return []
+        # Cheap path: every person we follow has exactly one face continuing its track.
+        locks = [tr.locked(faces, idx) for tr in tracks]
+        if all(l is not None for l in locks) and len(set(locks)) == len(locks):
+            due = [r for r, tr in enumerate(tracks) if idx - tr.verified_idx >= self.VERIFY_EVERY]
+            if due:
+                self.engine.embed(frame, [faces[locks[r]] for r in due])
+            if all(tracks[r].score(faces[locks[r]], idx) is not None for r in due):
+                for r in due:
+                    tracks[r].verified_idx = idx
+                return list(enumerate(locks))
+        # Full path: identify everyone, then assign jointly (best match first, each face and
+        # person used once) so two of your faces can never land on the same person.
+        self.engine.embed(frame, faces)
+        cands = sorted(((s, r, i) for r, tr in enumerate(tracks) for i, f in enumerate(faces)
+                        if (s := tr.score(f, idx)) is not None), reverse=True)
+        used_r, used_f, out = set(), set(), []
+        for _, r, i in cands:
+            if r in used_r or i in used_f:
+                continue
+            used_r.add(r)
+            used_f.add(i)
+            tracks[r].verified_idx = idx
+            out.append((r, i))
+        return out
 
     def apply(self, frame: np.ndarray, analysis: list[list[Face]], idx: int) -> tuple[np.ndarray, list[int]]:
         """Swap the frame in place. Returns the role index of every face swapped."""
@@ -381,17 +449,8 @@ class FrameSwapper:
                     self.engine.swap_face(frame, f.kps, self.roles[0].latent, self.tier)
                     swapped.append(0)
                 continue
-            # Assign faces to people jointly: best match first, each face and person used once,
-            # so two of your faces can never land on the same person.
             tracks = self.tracks[half]
-            cands = sorted(((s, r, i) for r, tr in enumerate(tracks) for i, f in enumerate(faces)
-                            if (s := tr.score(f, idx)) is not None), reverse=True)
-            used_r, used_f = set(), set()
-            for _, r, i in cands:
-                if r in used_r or i in used_f:
-                    continue
-                used_r.add(r)
-                used_f.add(i)
+            for r, i in self._assign(frame, faces, tracks, idx):
                 kps = tracks[r].commit(faces[i], idx)
                 self.engine.swap_face(frame, kps, self.roles[r].latent, self.tier)
                 swapped.append(r)

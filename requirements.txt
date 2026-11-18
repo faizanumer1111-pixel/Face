@@ -10,4 +10,5 @@ onnxruntime            # CPU. With an NVIDIA GPU use onnxruntime-gpu instead (no
 fastapi
 uvicorn[standard]
 python-multipart
+static-ffmpeg        # supplies ffmpeg/ffprobe if they aren't installed
 modal                  # only needed to deploy to Modal

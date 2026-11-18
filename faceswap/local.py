@@ -37,8 +37,13 @@ class LocalBackend:
     def accelerator(self) -> str:
         if self._engine is None:
             import onnxruntime as ort
-            return "GPU (CUDA)" if "CUDAExecutionProvider" in ort.get_available_providers() else "CPU"
-        return "GPU (CUDA)" if self._engine.gpu else "CPU"
+            avail = ort.get_available_providers()
+            if "CUDAExecutionProvider" in avail:
+                return "GPU (CUDA)"
+            if "CoreMLExecutionProvider" in avail:
+                return "Apple silicon (CoreML)"
+            return "CPU"
+        return self._engine.device
 
     def warm(self) -> None:
         self._pool.submit(lambda: self.engine)
