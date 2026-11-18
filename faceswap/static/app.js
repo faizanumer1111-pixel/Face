@@ -14,7 +14,8 @@
     jobId: null, jobPromise: null,
     videoFile: null, videoUrl: null, playable: false, duration: 0, fps: 30,
     meta: null, uploading: false, uploadPct: 0,
-    faces: [], activeFace: "a", assign: {},   // assign: face id -> person id from the scan
+    faces: [], activeFace: "a", assign: {},   // assign: face id -> "largest" | "all" | "photo" | person id from a scan
+    targets: {},                               // face id -> {photos, usable, busy, seq} photo of the person it replaces
     pickFor: null, camFor: null,
     inT: 0, outT: 0, t: 0,
     people: null, scanning: false,
@@ -132,10 +133,12 @@
     if (!id) return toast(`Up to ${SLOTS().length} faces can be swapped in one render.`, true);
     S.faces.push({ id, photos: [], usable: 0, busy: false, seq: 0 });
     S.activeFace = id;
-    if (S.faces.length > 1) {  // "Every face" only works with a single face
-      for (const k of Object.keys(S.assign)) if (S.assign[k] === "all") delete S.assign[k];
+    S.assign[id] = "largest";  // simplest default: A takes the biggest face, B the next biggest...
+    if (S.faces.length > 1) {  // "Everyone" only works with a single face
+      for (const k of Object.keys(S.assign)) if (S.assign[k] === "all") S.assign[k] = "largest";
     }
     renderFaces();
+    renderWho();
     renderCast();
     update();
     if (pick) pickPhotos(id);
@@ -147,9 +150,11 @@
     f.photos.forEach((p) => URL.revokeObjectURL(p.url));
     S.faces = S.faces.filter((x) => x !== f);
     delete S.assign[id];
+    delete S.targets[id];
     if (S.activeFace === id) S.activeFace = S.faces[0].id;
     if (S.jobId) api("DELETE", `/api/jobs/${S.jobId}/faces/${id}`).catch(() => {});
     renderFaces();
+    renderWho();
     renderCast();
     update();
   }
@@ -244,7 +249,10 @@
       const target = el("span", "face-set-target");
       const pid = S.assign[f.id];
       const person = pid && S.people && S.people.find((p) => p.id === pid);
-      if (pid === "all") target.textContent = "replaces every face";
+      const tphoto = S.targets[f.id] && S.targets[f.id].photos.find((x) => x.thumb);
+      if (pid === "all") target.textContent = "replaces everyone";
+      else if (pid === "largest") target.textContent = S.faces.indexOf(f) ? `replaces the #${S.faces.indexOf(f) + 1} biggest face` : "replaces the biggest face";
+      else if (pid === "photo" && tphoto) { const img = el("img"); img.src = tphoto.thumb; img.alt = ""; target.append("replaces", img); }
       else if (person) {
         const img = el("img");
         img.src = person.thumb;
@@ -354,13 +362,14 @@
     stopPolling();
     Object.assign(S, {
       videoFile: file, videoUrl: URL.createObjectURL(file), playable: false, meta: null,
-      people: null, assign: {}, takes: [], take: null, duration: 0, inT: 0, outT: 0, t: 0,
+      people: null, takes: [], take: null, duration: 0, inT: 0, outT: 0, t: 0,
       filmstripDone: false,
     });
     $("filmstrip").getContext("2d").clearRect(0, 0, $("filmstrip").width, $("filmstrip").height);
     $("scanBtn").textContent = "Find people";
     showSource();
     renderCast();
+    renderWho();
     renderTakes();
     $("renderPanel").hidden = true;
     $("videoDrop").hidden = true;
@@ -475,7 +484,7 @@
 
   // ------------------------------------------------------------------ timeline
   const tl = $("timeline");
-  const minSel = () => Math.max(2 / (S.fps || 30), 0.1);
+  const minSel = () => Math.min(0.5, Math.max(2 / (S.fps || 30), 0.1), (S.duration || 1) / 2);
   function layoutTimeline() {
     const d = S.duration || 1;
     tl.classList.toggle("empty", !S.duration);
@@ -488,16 +497,57 @@
     $("hIn").setAttribute("aria-valuetext", tc(S.inT));
     $("hOut").setAttribute("aria-valuetext", tc(S.outT));
     const len = S.outT - S.inT;
+    if (document.activeElement !== $("inField")) $("inField").value = S.duration ? tc(S.inT).replace(/^00:/, "0:") : "";
+    if (document.activeElement !== $("outField")) $("outField").value = S.duration ? tc(S.outT).replace(/^00:/, "0:") : "";
+    const whole = S.duration && S.inT === 0 && S.outT === S.duration;
+    $("wholeBtn").hidden = !S.duration || !!whole;
     $("selReadout").innerHTML = S.duration
-      ? `Rendering <b>${tc(S.inT)}</b> to <b>${tc(S.outT)}</b>, ${len.toFixed(2)} s of ${tc(S.duration)}. Drag the green handles or press I and O at the playhead.`
+      ? (whole ? `Rendering the whole video (${len.toFixed(1)} s). To render part of it, type times above or drag the green handles.`
+        : `Rendering <b>${tc(S.inT)}</b> to <b>${tc(S.outT)}</b>, ${len.toFixed(1)} s of ${tc(S.duration)}.`)
       : "Drop a video to choose the section you want.";
   }
   function xToT(clientX) {
     const r = tl.getBoundingClientRect();
     return Math.min(Math.max(0, (clientX - r.left) / r.width), 1) * S.duration;
   }
-  function setIn(t) { S.inT = Math.min(Math.max(0, t), S.outT - minSel()); layoutTimeline(); }
-  function setOut(t) { S.outT = Math.max(Math.min(S.duration, t), S.inT + minSel()); layoutTimeline(); }
+  function setIn(t, strict) {
+    t = Math.max(0, t);
+    if (strict && t > S.outT - minSel()) {
+      toast("The start has to come before the end. Move the playhead earlier, or set the end first.", true);
+      return false;
+    }
+    S.inT = Math.min(t, S.outT - minSel());
+    layoutTimeline();
+    return true;
+  }
+  function setOut(t, strict) {
+    t = Math.min(S.duration, t);
+    if (strict && t < S.inT + minSel()) {
+      toast(S.inT === 0 ? "Play or drag to where the section should end, then press End here."
+        : "The end has to come after the start. Move the playhead later, or set the start first.", true);
+      return false;
+    }
+    S.outT = Math.max(t, S.inT + minSel());
+    layoutTimeline();
+    return true;
+  }
+  function wholeVideo() { S.inT = 0; S.outT = S.duration; layoutTimeline(); }
+  // "12", "12.5", "1:05", "1:05.5", "01:02:03" -> seconds
+  function parseTime(str) {
+    const parts = String(str).trim().replace(",", ".").split(":").map(Number);
+    if (!parts.length || parts.some((n) => !isFinite(n) || n < 0)) return null;
+    return parts.reduce((acc, n) => acc * 60 + n, 0);
+  }
+  function bindTimeField(input, apply) {
+    const commit = () => {
+      const t = parseTime(input.value);
+      if (t == null) { toast("Type a time like 12.5 or 1:05.", true); layoutTimeline(); return; }
+      if (!apply(t, true)) layoutTimeline();
+      else seek(input === $("inField") ? S.inT : S.outT);
+    };
+    input.addEventListener("change", commit);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); input.blur(); } e.stopPropagation(); });
+  }
 
   function dragger(target, onMove) {
     target.addEventListener("pointerdown", (e) => {
@@ -580,7 +630,130 @@
     filmTimer = setTimeout(() => { if (S.duration) buildFilmstrip(); }, 350);
   });
 
-  // ------------------------------------------------------------------ 3. people
+  // ------------------------------------------------------------------ 3. who gets replaced
+  function setWho(faceId, mode) {
+    if (mode === "all") for (const f of S.faces) if (f.id !== faceId) S.assign[f.id] = "largest";
+    S.assign[faceId] = mode;
+    renderWho();
+    renderCast();
+    renderFaces();
+    update();
+    if (mode === "photo" && !(S.targets[faceId] && S.targets[faceId].photos.length)) pickTarget(faceId);
+  }
+  function pickTarget(faceId) {
+    S.pickTargetFor = faceId;
+    $("targetInput").click();
+  }
+  async function addTargetPhotos(files, faceId) {
+    const imgs = [...files].filter(isImage);
+    if (!imgs.length) return toast("Drop a photo (JPG or PNG) of the person to replace. A screenshot from the video works.", true);
+    const t = (S.targets[faceId] = S.targets[faceId] || { photos: [], usable: 0, busy: false, seq: 0 });
+    const room = maxPhotos() - t.photos.length;
+    if (room <= 0) return toast(`That's already ${maxPhotos()} photos. Remove one to add another.`, true);
+    for (const file of imgs.slice(0, room)) {
+      const blob = await downscale(file);
+      t.photos.push({ blob, url: URL.createObjectURL(blob), state: "busy", thumb: null, error: null });
+    }
+    S.assign[faceId] = "photo";
+    renderWho();
+    syncTarget(faceId);
+    warm();
+  }
+  async function syncTarget(faceId) {
+    const t = S.targets[faceId];
+    const seq = ++t.seq;
+    if (!t.photos.length) {
+      t.usable = 0; t.busy = false;
+      renderWho(); renderFaces(); update();
+      if (S.jobId) api("DELETE", `/api/jobs/${S.jobId}/targets/${faceId}`).catch(() => {});
+      return;
+    }
+    t.busy = true;
+    t.photos.forEach((p) => (p.state = "busy"));
+    renderWho(); update();
+    try {
+      const id = await ensureJob();
+      const form = new FormData();
+      t.photos.forEach((p, i) => form.append("files", p.blob, `${i}.jpg`));
+      const r = await task("POST", `/api/jobs/${id}/targets/${faceId}`, form);
+      if (seq !== t.seq) return;
+      r.photos.forEach((res, i) => { const p = t.photos[i]; if (!p) return; p.state = res.ok ? "ok" : "bad"; p.thumb = res.thumb || null; p.error = res.error || null; });
+      t.usable = r.usable;
+      if (!r.usable) toast("No face found in that photo. Use a clear shot of the person's face, a screenshot from the video is ideal.", true, 6000);
+    } catch (e) {
+      if (seq !== t.seq) return;
+      t.photos.forEach((p) => (p.state = "bad")); t.usable = 0; toast(e.message, true);
+    }
+    t.busy = false;
+    renderWho(); renderFaces(); update();
+  }
+  function renderWho() {
+    const box = $("who");
+    box.textContent = "";
+    const multi = S.faces.length > 1;
+    S.faces.forEach((f, idx) => {
+      const row = el("div", "who-row");
+      row.style.setProperty("--role", roleVar(f.id));
+      const tag = el("span", "role-tag", f.id.toUpperCase());
+      tag.title = faceName(f);
+      row.append(tag);
+      const opts = el("div", "who-opts");
+      opts.setAttribute("role", "radiogroup");
+      opts.setAttribute("aria-label", `Who ${faceName(f)} replaces`);
+      const cur = S.assign[f.id];
+      const scanned = cur && cur !== "all" && cur !== "largest" && cur !== "photo" && S.people && S.people.find((p) => p.id === cur);
+      const choices = [
+        ["largest", idx ? `The #${idx + 1} biggest face` : "The biggest face", idx ? "" : "in each frame, no searching"],
+        ...(multi ? [] : [["all", "Everyone", "every face in the video"]]),
+        ["photo", "A specific person", "drop a photo of them"],
+      ];
+      if (scanned) choices.push([cur, "Picked from the video", `on screen ${Math.round(scanned.share * 100)}%`, scanned.thumb]);
+      choices.forEach(([mode, label, sub, img]) => {
+        const b = el("button", "who-opt");
+        b.type = "button";
+        b.setAttribute("role", "radio");
+        b.setAttribute("aria-checked", String(cur === mode));
+        if (img) { const i = el("img"); i.src = img; i.alt = ""; b.append(i); }
+        b.append(el("span", "", label));
+        if (sub) b.append(el("small", "", sub));
+        b.onclick = () => setWho(f.id, mode);
+        opts.append(b);
+      });
+      row.append(opts);
+      if (cur === "photo") {
+        const t = S.targets[f.id] || { photos: [] };
+        const wrap = el("div", "who-target");
+        const drop = el("div", `key-surface${t.photos.length ? " has-faces" : ""}`);
+        drop.tabIndex = 0;
+        drop.setAttribute("role", "button");
+        drop.setAttribute("aria-label", `Photo of the person ${faceName(f)} replaces`);
+        const copy = el("span", "key-copy");
+        copy.append(el("strong", "", t.photos.length ? "Add another photo" : "Drop their photo"));
+        drop.append(copy);
+        drop.onclick = () => pickTarget(f.id);
+        drop.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickTarget(f.id); } };
+        const list = el("ul", "face-list");
+        t.photos.forEach((p, i) => {
+          const li = el("li", `face-item ${p.state}`);
+          const im = el("img"); im.src = p.thumb || p.url; im.alt = `Person to replace, photo ${i + 1}`;
+          li.append(im);
+          if (p.state !== "busy") li.append(el("span", "face-state", p.state === "ok" ? "\u2713" : "!"));
+          const rm = el("button", "remove", "\u00d7"); rm.type = "button"; rm.setAttribute("aria-label", "Remove this photo");
+          rm.onclick = () => { URL.revokeObjectURL(p.url); t.photos.splice(i, 1); renderWho(); syncTarget(f.id); };
+          li.append(rm);
+          if (p.error) li.title = p.error;
+          list.append(li);
+        });
+        const err = t.photos.find((p) => p.error);
+        const side = el("div");
+        side.append(list, el("p", "hint", err ? err.error : "A screenshot of their face from the video is ideal. Only that person gets swapped."));
+        wrap.append(drop, side);
+        row.append(wrap);
+      }
+      box.append(row);
+    });
+  }
+
   async function scan() {
     if (!S.meta) return;
     const btn = $("scanBtn");
@@ -590,15 +763,12 @@
     try {
       const r = await task("POST", `/api/jobs/${S.jobId}/scan`, { start: S.inT, end: S.outT });
       S.people = r.people;
-      // person ids are renumbered by every scan, so earlier picks no longer apply
-      for (const k of Object.keys(S.assign)) if (S.assign[k] !== "all") delete S.assign[k];
-      if (!r.people.length) {
-        toast("No faces found in this section. Try a section where faces are clearly visible.", true);
-      } else if (r.people.length === 1 && S.faces.length === 1) {
-        S.assign[S.faces[0].id] = r.people[0].id;
-      }
-      S.activeFace = (S.faces.find((f) => !S.assign[f.id]) || S.faces[0]).id;
+      // person ids are renumbered by every scan, so earlier scan picks fall back to the default
+      for (const k of Object.keys(S.assign)) if (!["all", "largest", "photo"].includes(S.assign[k])) S.assign[k] = "largest";
+      if (!r.people.length) toast("No faces found in this section. Try a section where faces are clearly visible.", true);
+      S.activeFace = S.faces[0].id;
       renderCast();
+      renderWho();
       renderFaces();
     } catch (e) {
       toast(e.message, true);
@@ -615,11 +785,11 @@
     const active = S.activeFace;
     const owner = ownerOf(o.id);
     if (owner === active) {
-      delete S.assign[active];  // clicking your own pick again clears it
+      S.assign[active] = "largest";  // clicking your own pick again clears it
     } else {
-      if (owner) delete S.assign[owner];
+      if (owner) S.assign[owner] = "largest";
       S.assign[active] = o.id;
-      const next = S.faces.find((f) => !S.assign[f.id]);  // move on to the next face still waiting
+      const next = S.faces.find((f) => f.id !== active && !["all", "photo"].includes(S.assign[f.id]) && !(S.people || []).some((p) => p.id === S.assign[f.id]));
       if (next) S.activeFace = next.id;
       // jump to where this person shows up so the preview lands on them
       if (o.person && o.person.times.length) {
@@ -628,6 +798,7 @@
       }
     }
     renderCast();
+    renderWho();
     renderFaces();
     update();
   }
@@ -645,7 +816,7 @@
       c.setAttribute("aria-checked", String(S.activeFace === f.id));
       c.style.setProperty("--role", roleVar(f.id));
       c.append(el("span", "role-tag", f.id.toUpperCase()), el("span", "", faceName(f)),
-        el("small", "", S.assign[f.id] ? "✓" : "pick a person"));
+        el("small", "", (S.people || []).some((p) => p.id === S.assign[f.id]) ? "✓" : "pick a person"));
       c.onclick = () => { S.activeFace = f.id; renderAssignBar(); };
       chips.append(c);
     });
@@ -657,7 +828,6 @@
     renderAssignBar();
     if (S.config) renderFormat();
     if (!S.people) {
-      cast.append(el("li", "cast-empty", "Find the people in your section, then pick who gets replaced."));
       renderAppearances();
       return;
     }
@@ -670,7 +840,6 @@
     const opts = S.people.map((p) => ({
       id: p.id, img: p.thumb, label: `On screen ${Math.round(p.share * 100)}%`, person: p,
     }));
-    if (!multi) opts.push({ id: "all", img: null, label: "Every face" });
     opts.forEach((o) => {
       const li = el("li");
       const who = ownerOf(o.id);
@@ -781,7 +950,8 @@
     const hint = $("formatHint");
     hint.hidden = !on;
     const first = S.faces[0];
-    const who = first && S.assign[first.id] === "all" ? "the largest face" : first && S.faces.length > 1 ? `${faceName(first)}'s person` : "the person you picked";
+    const a0 = first && S.assign[first.id];
+    const who = a0 === "all" || a0 === "largest" ? "the biggest face" : first && S.faces.length > 1 ? `${faceName(first)}'s person` : "the person you picked";
     hint.textContent = S.frame.mode === "follow"
       ? `The crop glides to keep ${who} in frame. Preview a frame to see it.`
       : "Drag the box on the video to place the crop. It stays there for the whole section.";
@@ -863,9 +1033,15 @@
       if (f.busy) return `Checking the photos for ${faceName(f)}`;
       if (!f.usable) return multi ? `Add a photo for ${faceName(f)}, or remove it.` : "Add a photo of your face.";
     }
-    if (!S.people) return "Find people in the section, then pick who gets replaced.";
     for (const f of S.faces) {
-      if (!S.assign[f.id]) return multi ? `Pick who ${faceName(f)} replaces.` : "Pick who you're replacing.";
+      const a = S.assign[f.id];
+      if (!a) return multi ? `Pick who ${faceName(f)} replaces.` : "Pick who you're replacing.";
+      if (a === "photo") {
+        const t = S.targets[f.id];
+        if (!t || !t.photos.length) return `Drop a photo of the person ${faceName(f)} replaces, or choose "The biggest face".`;
+        if (t.busy) return "Checking the photo of the person to replace";
+        if (!t.usable) return `No face was found in the photo for ${faceName(f)}. Try a clearer one.`;
+      }
     }
     if (forRender && !$("consent").checked) return "Tick the permission box to render.";
     return "";
@@ -881,7 +1057,7 @@
     $("whyDisabled").textContent = rendering ? "" : renBlock;
     const steps = document.querySelectorAll("h2 .step");
     steps[0].classList.toggle("done", S.faces.every((f) => f.usable > 0));
-    steps[1].classList.toggle("done", !!S.people && S.faces.every((f) => S.assign[f.id]));
+    steps[1].classList.toggle("done", S.faces.every((f) => S.assign[f.id] && (S.assign[f.id] !== "photo" || (S.targets[f.id] && S.targets[f.id].usable))));
     steps[2].classList.toggle("done", !!S.takes.find((t) => t.state === "done"));
   }
 
@@ -903,7 +1079,7 @@
       showStage("preview", `Preview at ${tc(r.t)}, ${tierLabel(S.tier)}, ${(r.ms / 1000).toFixed(1)} s`);
       setSplit(50);
       const everyFace = S.assign[S.faces[0].id] === "all";
-      const missing = everyFace ? [] : S.faces.filter((f) => !r.found.includes(f.id));
+      const missing = everyFace ? [] : S.faces.filter((f) => !r.found.includes(f.id) && S.assign[f.id] !== "largest");
       if (!r.faces) toast("No faces in this frame. Move the playhead to a frame with a face.", true, 6000);
       else if (missing.length) {
         toast(S.faces.length === 1
@@ -1172,6 +1348,7 @@
   $("faceInput").addEventListener("change", (e) => { addPhotos(e.target.files, S.pickFor || S.activeFace); e.target.value = ""; });
   $("videoInput").addEventListener("change", (e) => { if (e.target.files[0]) setVideo(e.target.files[0]); e.target.value = ""; });
   $("addSetBtn").onclick = () => addFaceSet(true);
+  $("targetInput").addEventListener("change", (e) => { addTargetPhotos(e.target.files, S.pickTargetFor || S.faces[0].id); e.target.value = ""; });
   $("camCancel").onclick = closeCamera;
   $("camShoot").onclick = shoot;
 
@@ -1189,8 +1366,10 @@
     const vids = files.filter(isVideo), imgs = files.filter(isImage);
     if (vids.length) setVideo(vids[0]);
     if (imgs.length) {
-      const set = e.target.closest && e.target.closest(".face-set");  // dropped on a specific face?
-      addPhotos(imgs, set ? set.dataset.face : S.activeFace);
+      const whoRow = e.target.closest && e.target.closest(".who-row");   // dropped on "a specific person"?
+      const set = e.target.closest && e.target.closest(".face-set");     // dropped on a specific face?
+      if (whoRow) addTargetPhotos(imgs, S.faces[[...whoRow.parentNode.children].indexOf(whoRow)].id);
+      else addPhotos(imgs, set ? set.dataset.face : S.activeFace);
     }
     if (!vids.length && !imgs.length && files.length) toast("Drop a video (MP4, MOV) or a photo (JPG, PNG).", true);
   });
@@ -1198,8 +1377,11 @@
   $("playBtn").onclick = togglePlay;
   $("stepBack").onclick = () => step(-1);
   $("stepFwd").onclick = () => step(1);
-  $("markIn").onclick = () => setIn(curT());
-  $("markOut").onclick = () => setOut(curT());
+  $("markIn").onclick = () => setIn(curT(), true);
+  $("markOut").onclick = () => setOut(curT(), true);
+  $("wholeBtn").onclick = wholeVideo;
+  bindTimeField($("inField"), setIn);
+  bindTimeField($("outField"), setOut);
   $("scanBtn").onclick = scan;
   $("previewBtn").onclick = previewFrame;
   $("renderBtn").onclick = startRender;
@@ -1218,8 +1400,8 @@
     if (e.key === " " && !onButton) { e.preventDefault(); togglePlay(); }
     else if (e.key === "ArrowLeft" && !onSlider) { e.preventDefault(); step(e.shiftKey ? -(S.fps || 30) : -1); }
     else if (e.key === "ArrowRight" && !onSlider) { e.preventDefault(); step(e.shiftKey ? (S.fps || 30) : 1); }
-    else if (e.key === "i" || e.key === "I") setIn(curT());
-    else if (e.key === "o" || e.key === "O") setOut(curT());
+    else if (e.key === "i" || e.key === "I") setIn(curT(), true);
+    else if (e.key === "o" || e.key === "O") setOut(curT(), true);
     else if (e.key === "p" || e.key === "P") previewFrame();
   });
   window.addEventListener("beforeunload", (e) => {

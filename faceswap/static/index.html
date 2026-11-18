@@ -26,6 +26,7 @@
     <section class="rail rail-left" aria-labelledby="h-face">
       <h2 id="h-face"><span class="step">1</span>Faces</h2>
       <input type="file" id="faceInput" accept="image/*" multiple hidden>
+      <input type="file" id="targetInput" accept="image/*" multiple hidden>
       <div class="face-sets" id="faceSets"></div>
       <button type="button" class="btn add-set" id="addSetBtn">Add another face</button>
       <p class="hint">Clear, front-facing, good light. Up to 5 photos of each face, from different angles, give a closer likeness. Add another face to swap more than one person.</p>
@@ -81,8 +82,8 @@
         <span class="timecode"><span id="tcNow">00:00.00</span><span class="tc-sep">/</span><span id="tcDur">00:00.00</span></span>
         <span class="spacer"></span>
         <span class="mark-group">
-        <button type="button" class="chip-btn" id="markIn" title="Set the section start at the playhead (I)">Set in</button>
-        <button type="button" class="chip-btn" id="markOut" title="Set the section end at the playhead (O)">Set out</button>
+        <button type="button" class="chip-btn" id="markIn" title="Start the section at the playhead (I)">Start here</button>
+        <button type="button" class="chip-btn" id="markOut" title="End the section at the playhead (O)">End here</button>
         <label class="toggle small" title="Loop playback inside the section">
           <input type="checkbox" id="loopSel" checked><span>Loop section</span>
         </label>
@@ -99,20 +100,28 @@
         </div>
         <div class="playhead" id="playhead"></div>
       </div>
-      <p class="section-readout" id="selReadout">Drop a video to choose the section you want.</p>
+      <div class="section-row" id="sectionRow">
+        <label class="time-field">Start <input id="inField" type="text" inputmode="decimal" placeholder="0:00" autocomplete="off"></label>
+        <label class="time-field">End <input id="outField" type="text" inputmode="decimal" placeholder="0:00" autocomplete="off"></label>
+        <button type="button" class="chip-btn" id="wholeBtn">Whole video</button>
+        <p class="section-readout" id="selReadout">Drop a video to choose the section you want.</p>
+      </div>
 
       <div class="people" aria-labelledby="h-people">
-        <div class="people-head">
-          <h2 id="h-people"><span class="step">3</span>Who gets replaced?</h2>
-          <button type="button" class="btn" id="scanBtn" disabled>Find people</button>
-        </div>
-        <div class="assign-bar" id="assignBar" hidden>
-          <span class="assign-label" id="assignLabel">Choose a face, then click the person it replaces.</span>
-          <div class="assign-chips" id="assignChips" role="radiogroup" aria-labelledby="assignLabel"></div>
-        </div>
-        <ul class="cast" id="cast" aria-labelledby="h-people">
-          <li class="cast-empty">Find the people in your section, then pick who gets replaced.</li>
-        </ul>
+        <h2 id="h-people"><span class="step">3</span>Who gets replaced?</h2>
+        <div class="who" id="who"></div>
+        <details class="scan-adv" id="scanAdv">
+          <summary>Pick a person from the video instead</summary>
+          <div class="people-head">
+            <p class="hint">Scans the section for faces (takes a moment), then you click the person to replace.</p>
+            <button type="button" class="btn" id="scanBtn" disabled>Find people</button>
+          </div>
+          <div class="assign-bar" id="assignBar" hidden>
+            <span class="assign-label" id="assignLabel">Choose a face, then click the person it replaces.</span>
+            <div class="assign-chips" id="assignChips" role="radiogroup" aria-labelledby="assignLabel"></div>
+          </div>
+          <ul class="cast" id="cast" aria-labelledby="h-people"></ul>
+        </details>
       </div>
     </section>
 

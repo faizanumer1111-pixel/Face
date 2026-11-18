@@ -24,8 +24,9 @@ from .reframe import Reframer, crop_size, parse_frame
 
 
 def parse_cast(d: dict) -> list[dict]:
-    """Who replaces whom: [{"face": "a", "person": "p1"}, {"face": "b", "person": "p3"}].
-    `person` may be "all" (every face) only when a single face is used."""
+    """Who replaces whom: [{"face": "a", "person": "largest"}, {"face": "b", "person": "photo"}].
+    `person` is "all" (everyone; single face only), "largest" (biggest face in frame),
+    "photo" (the person in the reference photo uploaded for that face), or a person id from a scan."""
     cast = d.get("cast")
     if cast is None:  # single-face shorthand
         cast = [{"face": d.get("face", "a"), "person": d.get("person")}]
@@ -46,7 +47,9 @@ def parse_cast(d: dict) -> list[dict]:
         if person in people:
             raise ValueError("Two faces are set to replace the same person. Give each face its own person.")
         if person == "all" and len(cast) > 1:
-            raise ValueError("'Every face' only works with a single face. Remove the other faces or pick people.")
+            raise ValueError("'Everyone' only works with a single face. Remove the other faces or pick people.")
+        if person == "largest":
+            people.discard(person)  # several faces may each want "the biggest remaining face"
         faces.add(face)
         people.add(person)
         out.append({"face": face, "person": person})
@@ -139,12 +142,52 @@ def load_identity(engine: FaceEngine, store: JobStore, jid: str, slot: str = "a"
 
 
 def load_roles(engine: FaceEngine, store: JobStore, jid: str, cast: list[dict]) -> list[Role]:
-    return [Role(load_identity(engine, store, jid, c["face"]), load_target(store, jid, c["person"])) for c in cast]
+    roles = []
+    for c in cast:
+        latent = load_identity(engine, store, jid, c["face"])
+        who = c["person"]
+        if who in ("all", "largest"):
+            roles.append(Role(latent, None, who))
+        else:
+            roles.append(Role(latent, load_target(store, jid, who, c["face"]), "identity"))
+    return roles
 
 
-def load_target(store: JobStore, jid: str, person: str | None) -> np.ndarray | None:
-    if person in (None, "", "all"):
+# ---------------------------------------------------------------- the person to replace (by photo)
+def analyze_target(engine: FaceEngine, store: JobStore, jid: str, slot: str) -> dict:
+    """Read the photo(s) of the person Face <slot> replaces and store their identity."""
+    photos, embs = [], []
+    for p in store.target_paths(jid, slot)[:MAX_SOURCE_PHOTOS]:
+        img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            photos.append({"name": p.name, "ok": False, "error": "Can't open this image. Use a JPG, PNG or WebP."})
+            continue
+        face, canvas = engine.detect_source(img)
+        if face is None:
+            photos.append({"name": p.name, "ok": False, "error": "No face found in this photo. A clear screenshot of their face works best."})
+            continue
+        photos.append({"name": p.name, "ok": True, "thumb": face_thumb(canvas, face.bbox, 160)})
+        embs.append(face.emb)
+    store.write_json(jid, f"target_{slot}.json", {"embeddings": [e.tolist() for e in embs]})
+    return {"face": slot, "photos": photos, "usable": len(embs)}
+
+
+def clear_target(store: JobStore, jid: str, slot: str) -> None:
+    import shutil
+    shutil.rmtree(store.target_dir(jid, slot), ignore_errors=True)
+    (store.job_dir(jid) / f"target_{slot}.json").unlink(missing_ok=True)
+
+
+def load_target(store: JobStore, jid: str, person: str | None, slot: str = "a") -> np.ndarray | None:
+    if person in (None, "", "all", "largest"):
         return None
+    if person == "photo":
+        store.target_dir(jid, slot)
+        embs = store.read_json(jid, f"target_{slot}.json", {"embeddings": []})["embeddings"]
+        if not embs:
+            raise ValueError(f"Add a photo of the person Face {slot.upper()} replaces.")
+        e = np.mean([np.asarray(x, np.float32) for x in embs], axis=0)
+        return (e / np.linalg.norm(e)).astype(np.float32)
     for p in store.read_json(jid, "people.json", {"people": []})["people"]:
         if p["id"] == person:
             return np.asarray(p["centroid"], np.float32)
@@ -343,7 +386,7 @@ def validate_request(store: JobStore, jid: str, req: RenderRequest) -> None:
     for c in req.cast:
         if not face_embeddings(store, jid, c["face"]):
             raise ValueError(f"Add a clear photo for Face {c['face'].upper()} first.")
-        load_target(store, jid, c["person"])
+        load_target(store, jid, c["person"], c["face"])
 
 
 def run_render(store: JobStore, progress, rid: str, req: RenderRequest, plan: dict, run_chunks,

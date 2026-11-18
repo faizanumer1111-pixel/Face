@@ -122,6 +122,24 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
         await run_in_threadpool(backend.persist)
         return await run_in_threadpool(task, "faces", jid, slot)
 
+    @app.post("/api/jobs/{jid}/targets/{slot}")
+    async def upload_target(jid: str, slot: str, files: list[UploadFile] = File(...)):
+        """Photo(s) of the person Face <slot> replaces (a screenshot from the video works)."""
+        d = store.target_dir(jid, slot)
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
+        for i, f in enumerate(files[:MAX_SOURCE_PHOTOS]):
+            ext = Path(f.filename or "").suffix.lower()
+            (d / f"{i}{ext if ext in IMAGE_EXTS else '.jpg'}").write_bytes(await f.read())
+        await run_in_threadpool(backend.persist)
+        return await run_in_threadpool(task, "target", jid, slot)
+
+    @app.delete("/api/jobs/{jid}/targets/{slot}")
+    def remove_target(jid: str, slot: str):
+        P.clear_target(store, jid, slot)
+        backend.persist()
+        return {"ok": True}
+
     @app.delete("/api/jobs/{jid}/faces/{slot}")
     def remove_face(jid: str, slot: str):
         P.clear_face(store, jid, slot)

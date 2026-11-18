@@ -380,9 +380,10 @@ class FaceEngine:
 
 @dataclass
 class Role:
-    """One face from the user's photos and the person in the video it replaces."""
+    """One face from the user's photos and who it replaces in the video."""
     latent: np.ndarray              # identity to apply
-    target: np.ndarray | None       # person to replace; None = every face (only valid alone)
+    target: np.ndarray | None       # identity of the person to replace (mode "identity")
+    mode: str = "identity"          # "identity" | "largest" (biggest face in frame) | "all" (every face)
 
 
 class FrameSwapper:
@@ -395,11 +396,13 @@ class FrameSwapper:
     def __init__(self, engine: FaceEngine, tier: Tier, roles: list[Role], fps: float, vr_sbs: bool = False):
         if not roles:
             raise ValueError("Pick at least one person to replace.")
-        if len(roles) > 1 and any(r.target is None for r in roles):
-            raise ValueError("'Every face' can only be used with a single face.")
+        if len(roles) > 1 and any(r.mode == "all" for r in roles):
+            raise ValueError("'Everyone' can only be used with a single face.")
         self.engine, self.tier, self.roles, self.vr = engine, tier, roles, vr_sbs
-        self.every_face = roles[0].target is None
+        self.every_face = roles[0].mode == "all"
+        self.needs_identity = any(r.mode == "identity" for r in roles)
         halves = 2 if vr_sbs else 1
+        # one track per role (identity roles match by face; "largest" roles only use it for smoothing)
         self.tracks = [[TargetTrack(r.target, tier.smoothing, fps) for r in roles] if not self.every_face else []
                        for _ in range(halves)]
         engine.warm(tier)
@@ -408,7 +411,7 @@ class FrameSwapper:
         """Detect faces. With embed=True (GPU prefetch) identities are computed up front;
         otherwise they are computed lazily in `apply`, only when tracking needs them."""
         if embed is None:
-            embed = not self.every_face and self.engine.accelerated
+            embed = self.needs_identity and self.engine.accelerated
         if not self.vr:
             return [self.engine.detect(frame, self.tier.det_size, embed=embed)]
         half = frame.shape[1] // 2
@@ -422,21 +425,34 @@ class FrameSwapper:
         """(role, face index) pairs for this frame."""
         if not faces:
             return []
+        ident = [r for r, role in enumerate(self.roles) if role.mode == "identity"]
+        out: list[tuple[int, int]] = []
+        if ident:
+            out = self._assign_identity(frame, faces, tracks, idx, ident)
+        # "Biggest face" roles take the largest faces nobody else claimed, in role order.
+        taken = {i for _, i in out}
+        free = sorted((i for i in range(len(faces)) if i not in taken), key=lambda i: -faces[i].size)
+        for r, role in enumerate(self.roles):
+            if role.mode == "largest" and free:
+                out.append((r, free.pop(0)))
+        return out
+
+    def _assign_identity(self, frame, faces, tracks, idx, ident: list[int]) -> list[tuple[int, int]]:
         # Cheap path: every person we follow has exactly one face continuing its track.
-        locks = [tr.locked(faces, idx) for tr in tracks]
-        if all(l is not None for l in locks) and len(set(locks)) == len(locks):
-            due = [r for r, tr in enumerate(tracks) if idx - tr.verified_idx >= self.VERIFY_EVERY]
+        locks = {r: tracks[r].locked(faces, idx) for r in ident}
+        if all(l is not None for l in locks.values()) and len(set(locks.values())) == len(locks):
+            due = [r for r in ident if idx - tracks[r].verified_idx >= self.VERIFY_EVERY]
             if due:
                 self.engine.embed(frame, [faces[locks[r]] for r in due])
             if all(tracks[r].score(faces[locks[r]], idx) is not None for r in due):
                 for r in due:
                     tracks[r].verified_idx = idx
-                return list(enumerate(locks))
+                return list(locks.items())
         # Full path: identify everyone, then assign jointly (best match first, each face and
         # person used once) so two of your faces can never land on the same person.
         self.engine.embed(frame, faces)
-        cands = sorted(((s, r, i) for r, tr in enumerate(tracks) for i, f in enumerate(faces)
-                        if (s := tr.score(f, idx)) is not None), reverse=True)
+        cands = sorted(((s, r, i) for r in ident for i, f in enumerate(faces)
+                        if (s := tracks[r].score(f, idx)) is not None), reverse=True)
         used_r, used_f, out = set(), set(), []
         for _, r, i in cands:
             if r in used_r or i in used_f:

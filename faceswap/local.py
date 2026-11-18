@@ -10,7 +10,7 @@ from . import pipeline as P
 from .engine import FaceEngine
 from .jobs import JobStore, MemoryProgress, NotFound
 
-OPS = {"faces": P.analyze_faces, "scan": P.scan_people, "preview": P.preview}
+OPS = {"faces": P.analyze_faces, "target": P.analyze_target, "scan": P.scan_people, "preview": P.preview}
 
 
 class LocalBackend:

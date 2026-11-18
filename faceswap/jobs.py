@@ -67,6 +67,15 @@ class JobStore:
     def face_paths(self, jid: str, slot: str) -> list[Path]:
         return sorted(self.face_dir(jid, slot).glob("*.*"))
 
+    def target_dir(self, jid: str, slot: str) -> Path:
+        """Photos of the person Face <slot> replaces."""
+        if slot not in FACE_SLOTS or len(slot) != 1:
+            raise ValueError(f"Unknown face '{slot}'.")
+        return self.job_dir(jid) / "targets" / slot
+
+    def target_paths(self, jid: str, slot: str) -> list[Path]:
+        return sorted(self.target_dir(jid, slot).glob("*.*"))
+
     def read_json(self, jid: str, name: str, default=None):
         p = self.job_dir(jid) / name
         if not p.exists():

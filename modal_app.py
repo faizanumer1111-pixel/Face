@@ -90,6 +90,15 @@ class Worker:
         return out
 
     @modal.method()
+    def target(self, jid: str, slot: str) -> dict:
+        from faceswap import pipeline as P
+
+        volume.reload()
+        out = P.analyze_target(self.engine, self.store, jid, slot)
+        volume.commit()
+        return out
+
+    @modal.method()
     def scan(self, jid: str, start: float, end: float) -> dict:
         from faceswap import pipeline as P
 
