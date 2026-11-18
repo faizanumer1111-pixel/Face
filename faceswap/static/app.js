@@ -19,6 +19,8 @@
     inT: 0, outT: 0, t: 0,
     people: null, scanning: false,
     tier: localStorage.getItem("lr.tier") || "fast",
+    frame: { aspect: "original", mode: "follow", cx: 0.5, cy: 0.5 },   // reframe (crop) settings
+    lastCrop: null,
     previewing: false,
     mode: "source",            // source | preview | result
     takes: [], take: null, comparing: false, comparePct: 50,
@@ -112,6 +114,7 @@
     $("runtime").textContent = `Face work runs on ${S.config.accelerator}`;
     if (!S.config.tiers.some((t) => t.key === S.tier)) S.tier = S.config.tiers[0].key;
     renderTiers();
+    renderFormat();
     update();
   }
 
@@ -375,6 +378,7 @@
       form.append("file", file, file.name || "video.mp4");
       S.meta = await upload(`/api/jobs/${id}/video`, form, setUploadPct);
       S.fps = S.meta.fps || 30;
+      renderFormat();
       if (!S.playable) {
         // the browser can't decode this format: drive the timeline from the server's frames
         setDuration(S.meta.duration);
@@ -402,6 +406,7 @@
     if (S.uploading) $("whyDisabled").textContent = `Uploading video ${Math.round(p * 100)}%`;
   }
   function setDuration(d) {
+    renderFormat();
     const keepSel = S.outT > 0 && S.outT <= d;
     S.duration = d;
     if (!keepSel) { S.inT = 0; S.outT = d; }
@@ -650,6 +655,7 @@
     const cast = $("cast");
     cast.textContent = "";
     renderAssignBar();
+    if (S.config) renderFormat();
     if (!S.people) {
       cast.append(el("li", "cast-empty", "Find the people in your section, then pick who gets replaced."));
       renderAppearances();
@@ -731,6 +737,122 @@
     });
   }
 
+  // ------------------------------------------------------------------ format (reframe)
+  const ASPECT_LABEL = { original: "Original", "9:16": "9:16", "4:5": "4:5", "1:1": "1:1", "16:9": "16:9" };
+  const ASPECT_USE = { original: "as filmed", "9:16": "Reels, TikTok, Stories", "4:5": "feed", "1:1": "square", "16:9": "landscape" };
+  function srcSize() {
+    if (S.meta) return [S.meta.width, S.meta.height];
+    if (video.videoWidth) return [video.videoWidth, video.videoHeight];
+    return [16, 9];
+  }
+  // same maths as the server: cut, never scale, even numbers
+  function cropSize(aspect) {
+    const [W, H] = srcSize();
+    const a = { "9:16": 9 / 16, "4:5": 4 / 5, "1:1": 1, "16:9": 16 / 9 }[aspect];
+    if (!a) return [W, H];
+    let cw, ch;
+    if (W / H > a) { ch = H; cw = H * a; } else { cw = W; ch = W / a; }
+    cw = Math.floor(cw / 2) * 2; ch = Math.floor(ch / 2) * 2;
+    return [Math.min(cw, W), Math.min(ch, H)];
+  }
+  const reframed = () => S.frame.aspect !== "original" && (() => { const [W, H] = srcSize(); const [w, h] = cropSize(S.frame.aspect); return w !== W || h !== H; })();
+  function renderFormat() {
+    const box = $("formatChips");
+    box.textContent = "";
+    const aspects = (S.config && S.config.aspects) || Object.keys(ASPECT_LABEL);
+    aspects.forEach((a) => {
+      const b = el("button", "chip");
+      b.type = "button";
+      b.dataset.aspect = a;
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-checked", String(S.frame.aspect === a));
+      b.title = ASPECT_USE[a] || "";
+      b.append(el("i"), el("span", "", ASPECT_LABEL[a] || a));
+      b.onclick = () => { S.frame.aspect = a; S.lastCrop = null; renderFormat(); };
+      box.append(b);
+    });
+    const on = reframed();
+    const [w, h] = cropSize(S.frame.aspect);
+    $("formatSize").textContent = !S.videoFile ? (S.frame.aspect === "original" ? "" : `Exports at ${ASPECT_LABEL[S.frame.aspect]}`)
+      : on ? `Exports ${w} × ${h}, cut from the ${srcSize().join(" × ")} original` : `Exports ${srcSize().join(" × ")} as filmed`;
+    $("formatMode").hidden = !on;
+    $("modeFollow").setAttribute("aria-checked", String(S.frame.mode === "follow"));
+    $("modeFixed").setAttribute("aria-checked", String(S.frame.mode === "fixed"));
+    const hint = $("formatHint");
+    hint.hidden = !on;
+    const first = S.faces[0];
+    const who = first && S.assign[first.id] === "all" ? "the largest face" : first && S.faces.length > 1 ? `${faceName(first)}'s person` : "the person you picked";
+    hint.textContent = S.frame.mode === "follow"
+      ? `The crop glides to keep ${who} in frame. Preview a frame to see it.`
+      : "Drag the box on the video to place the crop. It stays there for the whole section.";
+    $("vrToggle").disabled = on;
+    $("vrToggle").closest("label").title = on ? "VR footage can't be reframed. Set the format to Original." : "";
+    layoutCrop();
+  }
+  $("modeFollow").onclick = () => { S.frame.mode = "follow"; renderFormat(); };
+  $("modeFixed").onclick = () => { S.frame.mode = "fixed"; renderFormat(); };
+
+  // where the video actually sits inside the stage (object-fit: contain)
+  function videoRect() {
+    const st = $("stage").getBoundingClientRect();
+    const [W, H] = srcSize();
+    const k = Math.min(st.width / W, st.height / H);
+    const w = W * k, h = H * k;
+    return { left: (st.width - w) / 2, top: (st.height - h) / 2, width: w, height: h, stage: st };
+  }
+  function layoutCrop() {
+    const ov = $("cropOverlay");
+    const show = S.mode === "source" && !!S.videoFile && reframed();
+    ov.hidden = !show;
+    if (!show) return;
+    const r = videoRect();
+    const [W, H] = srcSize();
+    const [cw, ch] = cropSize(S.frame.aspect);
+    let cx = S.frame.cx, cy = S.frame.cy;
+    if (S.frame.mode === "follow" && S.lastCrop) { cx = S.lastCrop.x + S.lastCrop.w / 2; cy = S.lastCrop.y + S.lastCrop.h / 2; }
+    const fw = cw / W, fh = ch / H;
+    const x = Math.min(Math.max(cx - fw / 2, 0), 1 - fw), y = Math.min(Math.max(cy - fh / 2, 0), 1 - fh);
+    const bx = r.left + x * r.width, by = r.top + y * r.height, bw = fw * r.width, bh = fh * r.height;
+    const box = $("cropBox");
+    Object.assign(box.style, { left: `${bx}px`, top: `${by}px`, width: `${bw}px`, height: `${bh}px` });
+    box.classList.toggle("draggable", S.frame.mode === "fixed");
+    box.setAttribute("aria-valuenow", String(Math.round(cx * 100)));
+    box.setAttribute("aria-disabled", String(S.frame.mode !== "fixed"));
+    $("cropLabel").textContent = S.frame.mode === "fixed" ? `${ASPECT_LABEL[S.frame.aspect]} · drag to place` : `${ASPECT_LABEL[S.frame.aspect]} · follows the person`;
+    const dim = (sel, st) => Object.assign(ov.querySelector(sel).style, st);
+    dim(".crop-dim.n", { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${by - r.top}px` });
+    dim(".crop-dim.s", { left: `${r.left}px`, top: `${by + bh}px`, width: `${r.width}px`, height: `${r.top + r.height - by - bh}px` });
+    dim(".crop-dim.w", { left: `${r.left}px`, top: `${by}px`, width: `${bx - r.left}px`, height: `${bh}px` });
+    dim(".crop-dim.e", { left: `${bx + bw}px`, top: `${by}px`, width: `${r.left + r.width - bx - bw}px`, height: `${bh}px` });
+  }
+  let cropDrag = null;
+  $("cropBox").addEventListener("pointerdown", (e) => {
+    if (S.frame.mode !== "fixed") return;
+    e.preventDefault();
+    $("cropBox").setPointerCapture(e.pointerId);
+    cropDrag = { x: e.clientX, y: e.clientY, cx: S.frame.cx, cy: S.frame.cy };
+  });
+  $("cropBox").addEventListener("pointermove", (e) => {
+    if (!cropDrag) return;
+    const r = videoRect();
+    S.frame.cx = Math.min(Math.max(cropDrag.cx + (e.clientX - cropDrag.x) / r.width, 0), 1);
+    S.frame.cy = Math.min(Math.max(cropDrag.cy + (e.clientY - cropDrag.y) / r.height, 0), 1);
+    layoutCrop();
+  });
+  for (const ev of ["pointerup", "pointercancel"]) $("cropBox").addEventListener(ev, () => (cropDrag = null));
+  $("cropBox").addEventListener("keydown", (e) => {
+    if (S.frame.mode !== "fixed") return;
+    const d = e.shiftKey ? 0.1 : 0.02;
+    const map = { ArrowLeft: [-d, 0], ArrowRight: [d, 0], ArrowUp: [0, -d], ArrowDown: [0, d] };
+    if (!map[e.key]) return;
+    e.preventDefault();
+    e.stopPropagation();
+    S.frame.cx = Math.min(Math.max(S.frame.cx + map[e.key][0], 0), 1);
+    S.frame.cy = Math.min(Math.max(S.frame.cy + map[e.key][1], 0), 1);
+    layoutCrop();
+  });
+  window.addEventListener("resize", layoutCrop);
+
   // ------------------------------------------------------------------ gating
   function blocker(forRender) {
     if (!S.videoFile) return "Add the ad video.";
@@ -774,7 +896,8 @@
     update();
     try {
       const r = await task("POST", `/api/jobs/${S.jobId}/preview`,
-        { t, cast: castBody(), tier: S.tier, vr: $("vrToggle").checked });
+        { t, cast: castBody(), tier: S.tier, vr: $("vrToggle").checked, frame: S.frame });
+      S.lastCrop = r.crop || null;
       $("splitBefore").src = r.before;
       $("splitAfter").src = r.after;
       showStage("preview", `Preview at ${tc(r.t)}, ${tierLabel(S.tier)}, ${(r.ms / 1000).toFixed(1)} s`);
@@ -815,6 +938,7 @@
   // ------------------------------------------------------------------ stage modes
   function showStage(mode, badge) {
     S.mode = mode;
+    layoutCrop();
     $("split").hidden = mode !== "preview";
     $("stageBadge").hidden = !badge;
     $("stageBadge").textContent = badge || "";
@@ -837,9 +961,11 @@
     video.pause();
     video.src = `/api/renders/${take.rid}/video`;
     video.setAttribute("controls", "");
-    showStage("result", `Take ${take.n}, ${tierLabel(take.tier)}`);
-    $("compareBtn").disabled = !S.playable;
-    $("compareBtn").title = S.playable ? "" : "Your browser can't play the original file, so it can't be compared here.";
+    showStage("result", `Take ${take.n}, ${tierLabel(take.tier)}${take.aspect && take.aspect !== "original" ? `, ${take.aspect}` : ""}`);
+    const cropped = take.aspect && take.aspect !== "original";
+    $("compareBtn").disabled = !S.playable || cropped;
+    $("compareBtn").title = cropped ? "This take is cropped to a different shape, so it can't be laid over the original."
+      : S.playable ? "" : "Your browser can't play the original file, so it can't be compared here.";
     renderTakes();
     showPanelFor(take);
   }
@@ -885,11 +1011,11 @@
     busy(btn, true);
     try {
       const cast = castBody();
-      const body = { start: S.inT, end: S.outT, cast, tier: S.tier, vr: $("vrToggle").checked, consent: true };
+      const body = { start: S.inT, end: S.outT, cast, tier: S.tier, vr: $("vrToggle").checked, consent: true, frame: S.frame };
       const r = await api("POST", `/api/jobs/${S.jobId}/render`, body);
       // how much of the section each chosen person is on screen, to judge the face-found numbers later
       const share = Object.fromEntries(cast.map((c) => [c.face, ((S.people || []).find((p) => p.id === c.person) || { share: 1 }).share]));
-      const take = { n: S.takes.length + 1, rid: r.render_id, tier: S.tier, start: S.inT, end: S.outT, state: "queued", lanes: r.lanes, faces: cast.length, share };
+      const take = { n: S.takes.length + 1, rid: r.render_id, tier: S.tier, start: S.inT, end: S.outT, state: "queued", lanes: r.lanes, faces: cast.length, share, aspect: S.frame.aspect, outSize: r.out_size };
       S.takes.push(take);
       S.take = take;
       renderTakes();
@@ -1018,7 +1144,7 @@
       b.type = "button";
       if (S.take === t) b.setAttribute("aria-current", "true");
       const state = t.state === "done" ? `${(t.end - t.start).toFixed(1)} s` : t.state === "error" ? "Failed" : "Rendering";
-      b.append(el("span", "", `Take ${t.n}, ${tierLabel(t.tier)}${t.faces > 1 ? `, ${t.faces} faces` : ""}`), el("span", "", state));
+      b.append(el("span", "", `Take ${t.n}, ${tierLabel(t.tier)}${t.faces > 1 ? `, ${t.faces} faces` : ""}${t.aspect && t.aspect !== "original" ? `, ${t.aspect}` : ""}`), el("span", "", state));
       b.onclick = () => {
         if (t.state === "done") showResult(t);
         else { S.take = t; showPanelFor(t); renderTakes(); if (t.state !== "error") poll(t); }
@@ -1078,6 +1204,7 @@
   $("previewBtn").onclick = previewFrame;
   $("renderBtn").onclick = startRender;
   $("consent").onchange = update;
+  $("vrToggle").onchange = () => { if ($("vrToggle").checked) { S.frame.aspect = "original"; renderFormat(); } };
   $("stageClose").onclick = showSource;
   $("compareBtn").onclick = () => setCompare(!S.comparing);
 

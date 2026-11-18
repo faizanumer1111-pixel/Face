@@ -54,6 +54,12 @@
           <div class="split-handle" id="splitHandle" role="slider" tabindex="0" aria-label="Before and after divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></div>
           <span class="split-tag left">Original</span><span class="split-tag right">You</span>
         </div>
+        <div class="crop-overlay" id="cropOverlay" hidden>
+          <div class="crop-dim n"></div><div class="crop-dim s"></div><div class="crop-dim w"></div><div class="crop-dim e"></div>
+          <div class="crop-box" id="cropBox" role="slider" tabindex="0" aria-label="Crop position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
+            <span class="crop-label" id="cropLabel"></span>
+          </div>
+        </div>
         <div class="compare-handle" id="compareHandle" role="slider" tabindex="0" aria-label="Original and render divider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden></div>
         <div class="stage-badges">
           <span class="badge" id="stageBadge" hidden></span>
@@ -114,6 +120,17 @@
     <section class="rail rail-right" aria-labelledby="h-quality">
       <h2 id="h-quality"><span class="step">4</span>Quality</h2>
       <div class="tiers" id="tiers" role="radiogroup" aria-labelledby="h-quality"></div>
+
+      <div class="format" aria-labelledby="h-format">
+        <h3 id="h-format">Format</h3>
+        <div class="format-chips" id="formatChips" role="radiogroup" aria-labelledby="h-format"></div>
+        <p class="format-size" id="formatSize"></p>
+        <div class="format-mode" id="formatMode" role="radiogroup" aria-label="How the crop is placed" hidden>
+          <button type="button" class="seg" id="modeFollow" role="radio" aria-checked="true">Follows the person</button>
+          <button type="button" class="seg" id="modeFixed" role="radio" aria-checked="false">Fixed</button>
+        </div>
+        <p class="hint tight" id="formatHint" hidden></p>
+      </div>
 
       <label class="toggle">
         <input type="checkbox" id="vrToggle"><span>VR side-by-side footage</span>

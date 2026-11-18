@@ -314,6 +314,36 @@ h3 { font-size: var(--t-1); }
 .tier[aria-checked="true"] .meter i.on { background: var(--key); }
 .meter-label { margin-right: 3px; }
 
+/* format / reframe */
+.format { display: grid; gap: 0.5rem; }
+.format-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.chip {
+  display: inline-grid; justify-items: center; gap: 2px; padding: 0.4rem 0.6rem; min-width: 3.4rem;
+  border-radius: 5px; border: 1px solid var(--line-soft); background: var(--well); cursor: pointer; font-size: var(--t-0);
+}
+.chip:hover { border-color: var(--ink-3); }
+.chip[aria-checked="true"] { border-color: var(--key); box-shadow: inset 0 0 0 1px var(--key); }
+.chip i { display: block; width: 18px; height: 18px; border: 1.5px solid currentColor; border-radius: 2px; opacity: 0.8; }
+.chip[data-aspect="9:16"] i { width: 11px; } .chip[data-aspect="4:5"] i { width: 15px; } .chip[data-aspect="16:9"] i { height: 11px; }
+.chip[data-aspect="original"] i { border-style: dashed; }
+.format-size { margin: 0; color: var(--ink-3); font-size: var(--t-0); min-height: 1.2em; }
+.format-mode { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg { border: 0; background: transparent; padding: 0.4rem 0.5rem; font-size: var(--t-0); cursor: pointer; color: var(--ink-2); }
+.seg + .seg { border-left: 1px solid var(--line); }
+.seg[aria-checked="true"] { background: var(--key); color: var(--key-ink); font-weight: 650; }
+.crop-overlay { position: absolute; inset: 0; pointer-events: none; }
+.crop-dim { position: absolute; background: rgba(20,21,22,0.6); }
+.crop-box {
+  position: absolute; box-shadow: 0 0 0 2px var(--key); border-radius: 2px; pointer-events: auto; touch-action: none;
+  display: grid; place-items: end start;
+}
+.crop-box.draggable { cursor: grab; }
+.crop-box.draggable:active { cursor: grabbing; }
+.crop-box::before, .crop-box::after { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0.5; }
+.crop-box::before { border-left: 1px solid var(--key); border-right: 1px solid var(--key); left: 33.33%; right: 33.33%; }
+.crop-box::after { border-top: 1px solid var(--key); border-bottom: 1px solid var(--key); top: 33.33%; bottom: 33.33%; }
+.crop-label { margin: 6px; padding: 2px 7px; border-radius: 3px; background: var(--key); color: var(--key-ink); font-size: 0.72rem; font-weight: 650; }
+
 .toggle, .consent { display: flex; gap: 0.6rem; align-items: flex-start; cursor: pointer; }
 .toggle input, .consent input { accent-color: var(--key); width: 18px; height: 18px; margin: 2px 0 0; flex: none; }
 .toggle.small { font-size: var(--t-0); align-items: center; }
