@@ -11,6 +11,7 @@ quality levels. Bring up to four faces to replace several people in the same vid
 | **Your faces** | Drop 1 to 5 photos, or take one with your camera. Several angles are averaged into one identity for a closer likeness, and a photo of someone else is spotted and left out. **Add another face** (up to 4: Face A to D) to swap several people at once. |
 | **Pick the section** | Drag the green in/out handles on the filmstrip, or press `I` and `O` at the playhead. Only that section is rendered, and its audio is kept. |
 | **Pick who gets replaced** | **Find people** scans the section and lists everyone in it with how much of the section they're on screen. Click the person your face replaces; ticks on the timeline show where they appear. With several faces, choose Face A, B... and click the person each one replaces. Each face has its own colour so you can see who goes where, and a person can only be given one face. Everyone else is left alone. **Every face** is available when you use a single face. |
+| **Format** | Crop the render to 9:16 (Reels, TikTok, Stories), 4:5, 1:1 or 16:9 without scaling. **Follows the person** glides the crop to keep the person you picked in frame; **Fixed** lets you drag the crop box on the video and keep it there. The exact export size is shown. |
 | **Preview a frame** | Swaps the frame under the playhead in a few seconds and shows a draggable before/after split, before you spend time on a render. |
 | **Render** | Shows each GPU's progress, a live frame from the render, time left, and how much of the section each face was placed in. |
 | **Compare and download** | A slider over the playing result shows the original underneath. Every render is kept as a take so you can compare Fast against Premium. |
@@ -64,8 +65,18 @@ Uploaded videos and renders are deleted after 72 hours.
 
 ## Run on your own computer
 
-Needs Python 3.10+ and `ffmpeg` on your PATH. With an NVIDIA GPU, install `onnxruntime-gpu` instead
-of `onnxruntime`. On the CPU it works, but expect roughly 1 to 5 seconds per frame depending on the tier.
+**Mac, one command** (installs into `~/LeadRole`, then opens the app; run it again to update):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/faizanumer1111-pixel/Face/claude/practical-einstein-7yvfy4/mac_install.sh | bash
+```
+
+On Apple silicon the face models run on the chip's GPU / Neural Engine through CoreML
+(set `LEADROLE_COREML=0` to force the CPU). ffmpeg is downloaded automatically if it isn't installed.
+
+**Any computer, by hand.** Needs Python 3.10+. With an NVIDIA GPU, install `onnxruntime-gpu` instead
+of `onnxruntime`. On a CPU alone it works but is slow: about 0.7 s per frame for Fast on 4 cores,
+more for Better and Premium.
 
 ```bash
 pip install numpy cython
