@@ -20,7 +20,7 @@ from .media import MediaError, frame_jpeg, probe
 STATIC = Path(os.environ.get("LEADROLE_STATIC", Path(__file__).parent / "static"))
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-MAX_DURATION = float(os.environ.get("LEADROLE_MAX_SECONDS", 20 * 60))
+MAX_SECTION = P.MAX_SECTION_SECONDS          # per render; uploads can be longer and get trimmed
 
 
 class Backend(Protocol):
@@ -72,7 +72,7 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
     def config():
         return {"tiers": [t.public() for t in TIERS.values()], "backend": backend.name,
                 "accelerator": backend.accelerator, "max_photos": MAX_SOURCE_PHOTOS, "face_slots": FACE_SLOTS,
-                "parallel": backend.max_chunks, "max_seconds": MAX_DURATION, "aspects": list(ASPECTS)}
+                "parallel": backend.max_chunks, "max_seconds": MAX_SECTION, "aspects": list(ASPECTS)}
 
     @app.post("/api/warm")
     def warm():
@@ -103,9 +103,6 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
         except MediaError:
             dest.unlink(missing_ok=True)
             raise MediaError("That file isn't a video we can read. Try an MP4 or MOV.") from None
-        if meta["duration"] > MAX_DURATION:
-            dest.unlink(missing_ok=True)
-            raise ValueError(f"Videos up to {int(MAX_DURATION // 60)} minutes are supported. Trim it first.")
         store.write_json(jid, "meta.json", meta)
         await run_in_threadpool(backend.persist)
         return meta
@@ -188,6 +185,14 @@ def create_app(backend: Backend, store: JobStore) -> FastAPI:
         if st is None:
             raise NotFound("render")
         return st
+
+    @app.delete("/api/renders/{rid}")
+    def cancel_render(rid: str):
+        store.render_dir(rid)  # validates the id
+        st = backend.cancel(rid)
+        if st is None:
+            raise NotFound("render")
+        return {"state": st["state"]}
 
     @app.get("/api/renders/{rid}/live.jpg")
     def live(rid: str):

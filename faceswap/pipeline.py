@@ -22,6 +22,16 @@ from .jobs import JobStore
 from .media import FrameReader, FrameWriter, concat_and_mux, grab_frame, jpeg
 from .reframe import Reframer, crop_size, parse_frame
 
+MAX_SECTION_SECONDS = float(os.environ.get("LEADROLE_MAX_SECONDS", 20 * 60))
+
+
+class RenderCancelled(Exception):
+    pass
+
+
+def cancelled(progress, rid: str) -> bool:
+    return bool(progress.get(f"render:{rid}:cancel"))
+
 
 def parse_cast(d: dict) -> list[dict]:
     """Who replaces whom: [{"face": "a", "person": "largest"}, {"face": "b", "person": "photo"}].
@@ -276,6 +286,9 @@ def plan_render(store: JobStore, jid: str, req: RenderRequest, max_chunks: int |
     total = f1 - f0
     if total < 1:
         raise ValueError("The selected section is empty. Drag the in and out handles apart.")
+    if total / fps > MAX_SECTION_SECONDS + 0.5:
+        raise ValueError(f"One render covers up to {int(MAX_SECTION_SECONDS // 60)} minutes. Shorten the section "
+                         "(you can render the rest as another take).")
     limit = tier.max_chunks if max_chunks is None else min(max_chunks, tier.max_chunks)
     n = max(1, min(limit, math.ceil(total / (tier.min_chunk_seconds * fps))))
     bounds = [f0 + round(total * i / n) for i in range(n + 1)]
@@ -335,9 +348,14 @@ def render_chunk(engine: FaceEngine, store: JobStore, rid: str, chunk: dict, req
 
             for _ in range(max(workers * 2, 1)):
                 feed()
+            last_cancel_check = 0.0
             while pending:
                 frame, fut = pending.popleft()
                 feed()
+                if time.time() - last_cancel_check > 1.0:
+                    last_cancel_check = time.time()
+                    if cancelled(progress, rid):
+                        raise RenderCancelled()
                 analysis = fut.result() if fut else swapper.analyze(frame)
                 out, placed = swapper.apply(frame, analysis, done)
                 reframer.observe(swapper.focus(analysis, done))
@@ -397,17 +415,38 @@ def run_render(store: JobStore, progress, rid: str, req: RenderRequest, plan: di
     state["state"] = "rendering"
     progress.put(key, state)
     try:
+        if cancelled(progress, rid):
+            raise RenderCancelled()
         validate_request(store, rid.split("-")[0], req)
         run_chunks(plan["chunks"])
+        if cancelled(progress, rid):
+            raise RenderCancelled()
         state["state"] = "finalizing"
         progress.put(key, state)
         sync()
         final = finalize_render(store, rid, plan)
         persist()
         state.update(state="done", finished=time.time(), size=os.path.getsize(final))
+    except RenderCancelled:
+        state.update(state="cancelled", finished=time.time())
     except Exception as e:  # noqa: BLE001 - shown to the user
-        state.update(state="error", error=str(e) or e.__class__.__name__)
+        if cancelled(progress, rid):  # a cancelled chunk surfaces as an error from the pool
+            state.update(state="cancelled", finished=time.time())
+        else:
+            state.update(state="error", error=str(e) or e.__class__.__name__)
     progress.put(key, state)
+
+
+def cancel_render(progress, rid: str) -> dict | None:
+    """Ask a render to stop. Queued renders flip to 'cancelled' at once; running ones within a second."""
+    st = progress.get(f"render:{rid}")
+    if st is None:
+        return None
+    progress.put(f"render:{rid}:cancel", True)
+    if st["state"] == "queued":
+        st.update(state="cancelled", finished=time.time())
+        progress.put(f"render:{rid}", st)
+    return st
 
 
 def render_status(progress, rid: str) -> dict | None:

@@ -25,6 +25,7 @@ class LocalBackend:
         self._pool = ThreadPoolExecutor(2)
         self._render_pool = ThreadPoolExecutor(1)  # renders queue up one after another
         self._tasks: dict = {}
+        self._renders: dict = {}
 
     @property
     def engine(self) -> FaceEngine:
@@ -73,7 +74,13 @@ class LocalBackend:
             for c in chunks:
                 P.render_chunk(self.engine, self.store, rid, c, req, self.progress)
 
-        self._render_pool.submit(P.run_render, self.store, self.progress, rid, req, plan, run_chunks)
+        self._renders[rid] = self._render_pool.submit(P.run_render, self.store, self.progress, rid, req, plan, run_chunks)
+
+    def cancel(self, rid: str):
+        fut = self._renders.get(rid)
+        if fut is not None:
+            fut.cancel()  # drops it from the queue if it hasn't started
+        return P.cancel_render(self.progress, rid)
 
     def sync(self) -> None:
         pass

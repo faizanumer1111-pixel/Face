@@ -169,6 +169,11 @@ class ModalBackend:
 
         orchestrate.spawn(rid, asdict(req), plan)
 
+    def cancel(self, rid: str):
+        from faceswap import pipeline as P
+
+        return P.cancel_render(progress, rid)
+
     def warm(self) -> None:
         Worker().ping.spawn()
 

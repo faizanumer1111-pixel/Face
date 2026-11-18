@@ -437,7 +437,13 @@ h3 { font-size: var(--t-1); }
 }
 .take-list button:hover { border-color: var(--ink-3); color: var(--ink); }
 .take-list button[aria-current="true"] { border-color: var(--key); color: var(--ink); }
-.take-list button { position: relative; overflow: hidden; }
+.take-list li { display: grid; grid-template-columns: 1fr auto; gap: 0.3rem; align-items: stretch; }
+.take-list button:not(.take-x) { position: relative; overflow: hidden; }
+.take-x {
+  width: 32px; border: 1px solid var(--line-soft); border-radius: 4px; background: transparent; color: var(--ink-3);
+  cursor: pointer; font-size: 1.1rem; line-height: 1; padding: 0;
+}
+.take-x:hover { border-color: var(--warn); color: var(--warn); }
 .take-list .take-bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--key); transition: width 600ms linear; }
 .take-list .take-error { color: var(--warn); }
 

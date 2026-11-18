@@ -426,8 +426,10 @@
     renderFormat();
     const keepSel = S.outT > 0 && S.outT <= d;
     S.duration = d;
-    if (!keepSel) { S.inT = 0; S.outT = d; }
+    if (!keepSel) { S.inT = 0; S.outT = Math.min(d, maxSec()); }
+    if (S.outT - S.inT > maxSec()) S.outT = S.inT + maxSec();
     layoutTimeline();
+    if (!keepSel && d > maxSec()) toast(`This video is ${tc(d)} long. One render covers up to ${Math.round(maxSec() / 60)} minutes, so the first ${Math.round(maxSec() / 60)} minutes are selected. Move the section or render the rest as more takes.`, false, 9000);
     $("tcDur").textContent = tc(d);
     update();
   }
@@ -508,7 +510,7 @@
     if (document.activeElement !== $("inField")) $("inField").value = S.duration ? tc(S.inT).replace(/^00:/, "0:") : "";
     if (document.activeElement !== $("outField")) $("outField").value = S.duration ? tc(S.outT).replace(/^00:/, "0:") : "";
     const whole = S.duration && S.inT === 0 && S.outT === S.duration;
-    $("wholeBtn").hidden = !S.duration || !!whole;
+    $("wholeBtn").hidden = !S.duration || !!whole || S.duration > maxSec();
     $("selReadout").innerHTML = S.duration
       ? (whole ? `Rendering the whole video (${len.toFixed(1)} s). To render part of it, type times above or drag the green handles.`
         : `Rendering <b>${tc(S.inT)}</b> to <b>${tc(S.outT)}</b>, ${len.toFixed(1)} s of ${tc(S.duration)}.`)
@@ -518,6 +520,7 @@
     const r = tl.getBoundingClientRect();
     return Math.min(Math.max(0, (clientX - r.left) / r.width), 1) * S.duration;
   }
+  const maxSec = () => (S.config && S.config.max_seconds) || 1200;
   function setIn(t, strict) {
     t = Math.max(0, t);
     if (strict && t > S.outT - minSel()) {
@@ -525,6 +528,7 @@
       return false;
     }
     S.inT = Math.min(t, S.outT - minSel());
+    if (S.outT - S.inT > maxSec()) S.outT = Math.min(S.duration, S.inT + maxSec());  // the end follows the cap
     layoutTimeline();
     return true;
   }
@@ -536,10 +540,19 @@
       return false;
     }
     S.outT = Math.max(t, S.inT + minSel());
+    if (S.outT - S.inT > maxSec()) {
+      S.inT = Math.max(0, S.outT - maxSec());  // the start follows the cap
+      toast(`One render covers up to ${Math.round(maxSec() / 60)} minutes, so the start moved to ${tc(S.inT)}. Render the rest as another take.`, false, 6000);
+    }
     layoutTimeline();
     return true;
   }
-  function wholeVideo() { S.inT = 0; S.outT = S.duration; layoutTimeline(); }
+  function wholeVideo() {
+    S.inT = 0;
+    S.outT = Math.min(S.duration, maxSec());
+    layoutTimeline();
+    if (S.duration > maxSec()) toast(`The first ${Math.round(maxSec() / 60)} minutes are selected. One render covers up to ${Math.round(maxSec() / 60)} minutes; render the rest as another take.`, false, 7000);
+  }
   // "12", "12.5", "1:05", "1:05.5", "01:02:03" -> seconds
   function parseTime(str) {
     const parts = String(str).trim().replace(",", ".").split(":").map(Number);
@@ -1221,7 +1234,7 @@
   async function poll(take) {
     clearTimeout(take.timer);
     take.timer = null;
-    if (take.polling) return;  // one poll loop per take
+    if (take.polling || !S.takes.includes(take)) return;  // one poll loop per take; none for removed takes
     take.polling = true;
     try {
       const st = await api("GET", `/api/renders/${take.rid}`);
@@ -1240,7 +1253,7 @@
         take.polling = false;
         return;
       }
-      if (st.state === "error") { update(); take.polling = false; return; }
+      if (st.state === "error" || st.state === "cancelled") { update(); take.polling = false; return; }
     } catch (e) {
       if (S.take === take) $("renderMsg").textContent = `Lost contact with the server, retrying. (${e.message})`;
     }
@@ -1278,9 +1291,10 @@
       finalizing: "Stitching and adding audio",
       done: `Take ${take.n} is ready`,
       error: "Render stopped",
+      cancelled: "Stopped",
     };
     $("renderTitle").textContent = titles[st.state] || st.state;
-    $("tally").className = `tally ${st.state === "done" ? "done" : st.state === "error" ? "" : "live"}`;
+    $("tally").className = `tally ${st.state === "done" ? "done" : ["error", "cancelled"].includes(st.state) ? "" : "live"}`;
     $("renderPct").textContent = st.state === "done" ? "" : `${Math.floor((st.progress || 0) * 100)}%`;
 
     const box = $("lanes");
@@ -1338,18 +1352,42 @@
       b.type = "button";
       if (S.take === t) b.setAttribute("aria-current", "true");
       const pct = t.status ? Math.floor((t.status.progress || 0) * 100) : 0;
-      const state = t.state === "done" ? `Ready, ${(t.end - t.start).toFixed(1)} s` : t.state === "error" ? "Failed"
+      const state = t.state === "done" ? `Ready, ${(t.end - t.start).toFixed(1)} s` : t.state === "error" ? "Failed" : t.state === "cancelled" ? "Stopped"
         : t.state === "queued" ? "Queued" : t.state === "finalizing" ? "Finishing" : `Rendering ${pct}%`;
       const label = `Take ${t.n}, ${tierLabel(t.tier)}${t.faces > 1 ? `, ${t.faces} faces` : ""}${t.aspect && t.aspect !== "original" ? `, ${t.aspect}` : ""}${manyVideos ? `, ${t.video}` : ""}`;
       b.append(el("span", "", label), el("span", "", state));
       if (isActive(t)) { const bar = el("i", "take-bar"); bar.style.width = `${pct}%`; b.append(bar); }
       b.onclick = () => {
         if (t.state === "done") showResult(t);
-        else { S.take = t; showPanelFor(t); renderTakes(); if (t.state !== "error") poll(t); }
+        else { S.take = t; showPanelFor(t); renderTakes(); if (isActive(t)) poll(t); }
       };
-      li.append(b);
+      const x = el("button", "take-x", "\u00d7");
+      x.type = "button";
+      x.title = isActive(t) ? (t.state === "queued" ? "Remove from the queue" : "Stop this render") : "Remove from the list";
+      x.setAttribute("aria-label", `${x.title}: take ${t.n}`);
+      x.onclick = (ev) => { ev.stopPropagation(); removeTake(t); };
+      li.append(b, x);
       ol.append(li);
     });
+  }
+
+  async function removeTake(t) {
+    const wasActive = isActive(t);
+    if (wasActive) {
+      const wasQueued = t.state === "queued";
+      try { await api("DELETE", `/api/renders/${t.rid}`); } catch (e) { return toast(e.message, true); }
+      t.state = "cancelled";
+      toast(wasQueued ? `Take ${t.n} removed from the queue.` : `Take ${t.n} stopped.`);
+    }
+    clearTimeout(t.timer);
+    S.takes = S.takes.filter((x) => x !== t);
+    if (S.take === t) {
+      S.take = null;
+      $("renderPanel").hidden = true;
+      if (S.mode === "result") showSource();
+    }
+    renderTakes();
+    update();
   }
 
   // ------------------------------------------------------------------ warm GPUs early
