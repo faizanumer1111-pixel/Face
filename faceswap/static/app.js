@@ -113,6 +113,9 @@
       return;
     }
     $("runtime").textContent = `Face work runs on ${S.config.accelerator}`;
+    $("takesHint").textContent = S.config.backend === "modal"
+      ? "Takes render at the same time on separate GPUs. Change anything and press Render again to start the next one."
+      : "Takes render one after another on this computer. Change anything and press Render again to queue the next one.";
     if (!S.config.tiers.some((t) => t.key === S.tier)) S.tier = S.config.tiers[0].key;
     renderTiers();
     renderFormat();
@@ -359,12 +362,13 @@
     if (!isVideo(file)) return toast("That isn't a video file. Use an MP4 or MOV.", true);
     if (S.uploading) return toast("Wait for the current upload to finish.", true);
     if (S.videoUrl) URL.revokeObjectURL(S.videoUrl);
-    stopPolling();
+    const fresh = S.takes.length > 0;  // a running take still reads the old video: give this one its own workspace
     Object.assign(S, {
       videoFile: file, videoUrl: URL.createObjectURL(file), playable: false, meta: null,
-      people: null, takes: [], take: null, duration: 0, inT: 0, outT: 0, t: 0,
-      filmstripDone: false,
+      people: null, duration: 0, inT: 0, outT: 0, t: 0, filmstripDone: false,
     });
+    if (S.mode === "result") S.take = null;
+    if (fresh) { S.jobId = null; S.jobPromise = null; }
     $("filmstrip").getContext("2d").clearRect(0, 0, $("filmstrip").width, $("filmstrip").height);
     $("scanBtn").textContent = "Find people";
     showSource();
@@ -383,6 +387,10 @@
     setUploadPct(0);
     try {
       const id = await ensureJob();
+      if (fresh) {  // new workspace: send the faces (and photos of people to replace) again
+        S.faces.filter((f) => f.photos.length).forEach((f) => syncFaces(f));
+        Object.keys(S.targets).filter((k) => S.targets[k].photos.length && S.faces.some((f) => f.id === k)).forEach((k) => syncTarget(k));
+      }
       const form = new FormData();
       form.append("file", file, file.name || "video.mp4");
       S.meta = await upload(`/api/jobs/${id}/video`, form, setUploadPct);
@@ -1049,9 +1057,10 @@
   const castBody = () => S.faces.map((f) => ({ face: f.id, person: S.assign[f.id] }));
   function update() {
     const preBlock = blocker(false), renBlock = blocker(true);
-    const rendering = S.take && ["queued", "rendering", "finalizing"].includes(S.take.state);
+    const rendering = activeTakes().length > 0;
     $("previewBtn").disabled = !!preBlock || S.previewing;
-    $("renderBtn").disabled = !!renBlock || rendering;
+    $("renderBtn").disabled = !!renBlock;
+    $("renderBtn").textContent = rendering ? "Render another take" : "Render section";
     $("scanBtn").disabled = !S.meta || S.scanning;
     $("transport").setAttribute("aria-disabled", String(!S.duration));
     $("whyDisabled").textContent = rendering ? "" : renBlock;
@@ -1191,7 +1200,8 @@
       const r = await api("POST", `/api/jobs/${S.jobId}/render`, body);
       // how much of the section each chosen person is on screen, to judge the face-found numbers later
       const share = Object.fromEntries(cast.map((c) => [c.face, ((S.people || []).find((p) => p.id === c.person) || { share: 1 }).share]));
-      const take = { n: S.takes.length + 1, rid: r.render_id, tier: S.tier, start: S.inT, end: S.outT, state: "queued", lanes: r.lanes, faces: cast.length, share, aspect: S.frame.aspect, outSize: r.out_size };
+      const take = { n: S.takes.length + 1, rid: r.render_id, tier: S.tier, start: S.inT, end: S.outT, state: "queued", lanes: r.lanes, faces: cast.length, share, aspect: S.frame.aspect, outSize: r.out_size,
+        video: (S.videoFile && S.videoFile.name) || "video", jobId: S.jobId };
       S.takes.push(take);
       S.take = take;
       renderTakes();
@@ -1205,10 +1215,14 @@
     update();
   }
 
-  function stopPolling() { clearTimeout(S.pollTimer); S.pollTimer = null; }
+  const isActive = (t) => t && ["queued", "rendering", "finalizing"].includes(t.state);
+  const activeTakes = () => S.takes.filter(isActive);
   let liveAt = 0;
   async function poll(take) {
-    stopPolling();
+    clearTimeout(take.timer);
+    take.timer = null;
+    if (take.polling) return;  // one poll loop per take
+    take.polling = true;
     try {
       const st = await api("GET", `/api/renders/${take.rid}`);
       take.state = st.state;
@@ -1217,18 +1231,21 @@
         renderPanel(take);
         if (Date.now() - liveAt > 1800 && st.state === "rendering") { liveAt = Date.now(); refreshLive(take); }
       }
+      renderTakes();
       if (st.state === "done") {
-        renderTakes();
         update();
-        if (S.take === take) showResult(take);
+        // show it only if you're not already looking at another finished take
+        if (S.take === take || S.mode !== "result") showResult(take);
         toast(`Take ${take.n} is ready.`);
+        take.polling = false;
         return;
       }
-      if (st.state === "error") { renderTakes(); update(); return; }
+      if (st.state === "error") { update(); take.polling = false; return; }
     } catch (e) {
       if (S.take === take) $("renderMsg").textContent = `Lost contact with the server, retrying. (${e.message})`;
     }
-    S.pollTimer = setTimeout(() => poll(take), 1000);
+    take.polling = false;
+    take.timer = setTimeout(() => poll(take), 1000);
   }
   async function refreshLive(take) {
     try {
@@ -1311,16 +1328,21 @@
   }
 
   function renderTakes() {
-    $("takesWrap").hidden = S.takes.length < 2;
+    $("takesWrap").hidden = S.takes.length < 1;
     const ol = $("takes");
     ol.textContent = "";
+    const manyVideos = new Set(S.takes.map((t) => t.video)).size > 1;
     S.takes.forEach((t) => {
       const li = el("li");
-      const b = el("button");
+      const b = el("button", `take-${t.state}`);
       b.type = "button";
       if (S.take === t) b.setAttribute("aria-current", "true");
-      const state = t.state === "done" ? `${(t.end - t.start).toFixed(1)} s` : t.state === "error" ? "Failed" : "Rendering";
-      b.append(el("span", "", `Take ${t.n}, ${tierLabel(t.tier)}${t.faces > 1 ? `, ${t.faces} faces` : ""}${t.aspect && t.aspect !== "original" ? `, ${t.aspect}` : ""}`), el("span", "", state));
+      const pct = t.status ? Math.floor((t.status.progress || 0) * 100) : 0;
+      const state = t.state === "done" ? `Ready, ${(t.end - t.start).toFixed(1)} s` : t.state === "error" ? "Failed"
+        : t.state === "queued" ? "Queued" : t.state === "finalizing" ? "Finishing" : `Rendering ${pct}%`;
+      const label = `Take ${t.n}, ${tierLabel(t.tier)}${t.faces > 1 ? `, ${t.faces} faces` : ""}${t.aspect && t.aspect !== "original" ? `, ${t.aspect}` : ""}${manyVideos ? `, ${t.video}` : ""}`;
+      b.append(el("span", "", label), el("span", "", state));
+      if (isActive(t)) { const bar = el("i", "take-bar"); bar.style.width = `${pct}%`; b.append(bar); }
       b.onclick = () => {
         if (t.state === "done") showResult(t);
         else { S.take = t; showPanelFor(t); renderTakes(); if (t.state !== "error") poll(t); }
@@ -1405,7 +1427,7 @@
     else if (e.key === "p" || e.key === "P") previewFrame();
   });
   window.addEventListener("beforeunload", (e) => {
-    if (S.uploading || (S.take && ["queued", "rendering", "finalizing"].includes(S.take.state))) e.preventDefault();
+    if (S.uploading || activeTakes().length) e.preventDefault();
   });
 
   layoutTimeline();

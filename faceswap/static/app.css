@@ -437,6 +437,9 @@ h3 { font-size: var(--t-1); }
 }
 .take-list button:hover { border-color: var(--ink-3); color: var(--ink); }
 .take-list button[aria-current="true"] { border-color: var(--key); color: var(--ink); }
+.take-list button { position: relative; overflow: hidden; }
+.take-list .take-bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--key); transition: width 600ms linear; }
+.take-list .take-error { color: var(--warn); }
 
 /* ------------------------------------------------------------------ camera + toast */
 .camera { position: fixed; inset: 0; background: rgba(15,16,17,0.82); display: grid; place-items: center; z-index: 20; padding: 1rem; }
