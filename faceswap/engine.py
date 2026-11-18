@@ -205,6 +205,13 @@ class FaceEngine:
         ctx = 0 if self.gpu else -1
 
         buffalo = os.path.join(model_dir, "buffalo_l")
+        if "CoreMLExecutionProvider" in names:
+            # Older ONNX Runtime builds don't take CoreML options; fall back to the plain provider.
+            try:
+                ort.InferenceSession(os.path.join(buffalo, "w600k_r50.onnx"), providers=providers)
+            except Exception:  # noqa: BLE001
+                providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+                self.providers = providers
         self.det = get_model(os.path.join(buffalo, "det_10g.onnx"), providers=providers)
         self.det.prepare(ctx_id=ctx, input_size=(640, 640), det_thresh=0.5)
         self.rec = get_model(os.path.join(buffalo, "w600k_r50.onnx"), providers=providers)
