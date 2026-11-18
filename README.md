@@ -85,7 +85,11 @@ pip install -r requirements.txt
 python run_local.py          # downloads the models (~1.2 GB) on first run
 ```
 
-Then open http://127.0.0.1:8000.
+Then open http://127.0.0.1:8000. For everyday use start it with `./start_local.sh` instead: it
+restarts the app if it ever stops, keeps a Mac awake while running, and any render that was
+queued or in progress resumes by itself. Finished takes stay listed in your browser across reloads.
+
+Renders are saved under `data/jobs/<job>/renders/<render>/` and deleted after 72 hours.
 
 ## Project layout
 

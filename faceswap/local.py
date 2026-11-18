@@ -8,7 +8,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 
 from . import pipeline as P
 from .engine import FaceEngine
-from .jobs import JobStore, MemoryProgress, NotFound
+from .jobs import FileProgress, JobStore, NotFound
 
 OPS = {"faces": P.analyze_faces, "target": P.analyze_target, "scan": P.scan_people, "preview": P.preview}
 
@@ -19,13 +19,30 @@ class LocalBackend:
 
     def __init__(self, store: JobStore, model_dir: str, wait_seconds: float = 25):
         self.store, self.model_dir, self.wait = store, model_dir, wait_seconds
-        self.progress = MemoryProgress()
+        self.progress = FileProgress(store)
         self._engine: FaceEngine | None = None
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(2)
         self._render_pool = ThreadPoolExecutor(1)  # renders queue up one after another
         self._tasks: dict = {}
         self._renders: dict = {}
+        self.resume_unfinished()
+
+    def resume_unfinished(self) -> None:
+        """Pick up renders that were queued or running when the server last stopped."""
+        for rid in self.store.unfinished_renders():
+            st = self.progress.get(f"render:{rid}")
+            if not st or "plan" not in st:
+                st and self.progress.put(f"render:{rid}", dict(st, state="error", error="The server restarted before this render finished. Render it again."))
+                continue
+            try:
+                req = P.RenderRequest(**st["request"])
+            except (TypeError, ValueError):
+                continue
+            st["state"] = "queued"
+            self.progress.put(f"render:{rid}", st)
+            print(f"  resuming render {rid}", flush=True)
+            self.start_render(rid, req, st["plan"])
 
     @property
     def engine(self) -> FaceEngine:

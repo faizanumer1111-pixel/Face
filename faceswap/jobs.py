@@ -100,6 +100,18 @@ class JobStore:
         return n
 
 
+    def unfinished_renders(self) -> list[str]:
+        """Render ids whose saved state says they never finished (for resuming after a restart)."""
+        out = []
+        for st in self.root.glob("*/renders/*/state.json"):
+            try:
+                if json.loads(st.read_text()).get("state") in ("queued", "rendering", "finalizing"):
+                    out.append(st.parent.name)
+            except (OSError, ValueError):
+                continue
+        return sorted(out)
+
+
 class MemoryProgress:
     """Progress store for single-process runs. The Modal backend swaps in a modal.Dict."""
 
@@ -114,3 +126,64 @@ class MemoryProgress:
     def put(self, key, value):
         with self._lock:
             self._d[key] = value
+
+
+class FileProgress(MemoryProgress):
+    """Progress store that also survives a restart: render state lives next to the render files.
+
+    Keys: render:<rid> -> state.json, render:<rid>:chunk:<i> -> chunk_<i>.json,
+          render:<rid>:cancel -> cancel flag, render:<rid>:live -> live.jpg
+    """
+
+    def __init__(self, store: "JobStore"):
+        super().__init__()
+        self.store = store
+
+    def _path(self, key: str) -> Path | None:
+        parts = key.split(":")
+        if len(parts) < 2 or parts[0] != "render" or not RENDER_RE.match(parts[1]):
+            return None
+        try:
+            d = self.store.render_dir(parts[1], create=True)
+        except (NotFound, ValueError):
+            return None
+        if len(parts) == 2:
+            return d / "state.json"
+        if parts[2] == "chunk" and len(parts) == 4:
+            return d / f"chunk_{int(parts[3]):03d}.json"
+        if parts[2] == "cancel":
+            return d / "cancel"
+        if parts[2] == "live":
+            return d / "live.jpg"
+        return None
+
+    def get(self, key, default=None):
+        v = super().get(key)
+        if v is not None:
+            return v
+        p = self._path(key)
+        if p is None or not p.exists():
+            return default
+        try:
+            v = p.read_bytes() if p.suffix == ".jpg" else True if p.name == "cancel" else json.loads(p.read_text())
+        except (OSError, ValueError):
+            return default
+        super().put(key, v)
+        return v
+
+    def put(self, key, value):
+        super().put(key, value)
+        p = self._path(key)
+        if p is None:
+            return
+        try:
+            if p.suffix == ".jpg":
+                p.write_bytes(value)
+            elif p.name == "cancel":
+                p.write_text("1")
+            else:
+                tmp = p.with_suffix(".tmp")
+                tmp.write_text(json.dumps(value))
+                tmp.replace(p)
+        except OSError:
+            pass

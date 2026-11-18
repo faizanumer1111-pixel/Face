@@ -313,6 +313,9 @@ def render_chunk(engine: FaceEngine, store: JobStore, rid: str, chunk: dict, req
     out_path = chunk_path(store, rid, chunk["index"])
     key = f"render:{rid}:chunk:{chunk['index']}"
     count = chunk["count"]
+    done_before = progress.get(key) or {}
+    if done_before.get("finished") and os.path.exists(out_path):
+        return out_path  # already rendered before a restart
 
     swapper = FrameSwapper(engine, tier, roles, meta["fps"], req.vr)
     reframer = Reframer(meta["width"], meta["height"], req.frame, meta["fps"])
@@ -397,7 +400,7 @@ def finalize_render(store: JobStore, rid: str, plan: dict) -> str:
 def start_state(rid: str, req: RenderRequest, plan: dict) -> dict:
     return {"state": "queued", "render_id": rid, "request": asdict(req), "created": time.time(),
             "frames_total": plan["frames_total"], "duration": plan["duration"],
-            "chunk_sizes": [c["count"] for c in plan["chunks"]]}
+            "chunk_sizes": [c["count"] for c in plan["chunks"]], "plan": plan}
 
 
 def validate_request(store: JobStore, jid: str, req: RenderRequest) -> None:

@@ -1146,6 +1146,7 @@
   function showSource() {
     if (S.mode === "result") {
       video.removeAttribute("controls");
+      if (!S.videoUrl) { video.removeAttribute("src"); video.load(); video.hidden = true; $("videoDrop").hidden = false; showStage("source"); return; }
       video.src = S.videoUrl;
       video.currentTime = S.t;
       if (!S.playable) { video.hidden = true; $("posterFallback").hidden = false; }
@@ -1154,6 +1155,7 @@
   }
   function showResult(take) {
     S.take = take;
+    if (!S.videoUrl) { $("videoDrop").hidden = true; }
     $("posterFallback").hidden = true;
     video.hidden = false;
     video.pause();
@@ -1341,7 +1343,37 @@
     if (done) $("liveFrame").hidden = true;
   }
 
+  // Takes are remembered in this browser, so a reload or a server restart doesn't lose them.
+  function saveTakes() {
+    try {
+      localStorage.setItem("lr.takes", JSON.stringify(S.takes.map((t) => ({
+        n: t.n, rid: t.rid, tier: t.tier, start: t.start, end: t.end, state: t.state, lanes: t.lanes, faces: t.faces,
+        share: t.share, aspect: t.aspect, outSize: t.outSize, video: t.video, jobId: t.jobId,
+      }))));
+    } catch { /* storage unavailable */ }
+  }
+  async function restoreTakes() {
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem("lr.takes") || "[]"); } catch { return; }
+    if (!saved.length) return;
+    const kept = [];
+    for (const t of saved) {
+      try {
+        const st = await api("GET", `/api/renders/${t.rid}`);
+        t.state = st.state;
+        t.status = st;
+        kept.push(t);
+      } catch { /* expired on the server: drop it */ }
+    }
+    S.takes = kept;
+    saveTakes();
+    renderTakes();
+    update();
+    kept.filter(isActive).forEach((t) => poll(t));
+    if (kept.length) toast(`${kept.length} earlier take${kept.length > 1 ? "s" : ""} restored.`);
+  }
   function renderTakes() {
+    saveTakes();
     $("takesWrap").hidden = S.takes.length < 1;
     const ol = $("takes");
     ol.textContent = "";
@@ -1470,6 +1502,6 @@
 
   layoutTimeline();
   addFaceSet(false);
-  loadConfig();
+  loadConfig().then(restoreTakes);
   requestAnimationFrame(tick);
 })();

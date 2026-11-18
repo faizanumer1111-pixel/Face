@@ -63,11 +63,14 @@ say "Installing packages (first time takes a few minutes)"
 "$VPY" -m pip install -q opencv-python-headless onnxruntime fastapi "uvicorn[standard]" python-multipart static-ffmpeg
 "$VPY" -c "import static_ffmpeg; static_ffmpeg.add_paths()" >/dev/null 2>&1 || true
 
-# 5. Launch
+# 5. Launch under a watchdog: restarts the app if it ever stops, keeps the Mac awake while running,
+#    and unfinished renders resume on their own.
 say "Starting Lead Role (face models download on the first run, ~1.2 GB)"
+pkill -f "start_local.sh" >/dev/null 2>&1 || true
 pkill -f "run_local.py" >/dev/null 2>&1 || true
 cd "$DIR/app"
-nohup "$VPY" run_local.py --port "$PORT" --models "$DIR/models" --data "$DIR/data" > "$DIR/server.log" 2>&1 &
+chmod +x start_local.sh
+LEADROLE_PYTHON="$VPY" LEADROLE_LOG="$DIR/server.log" nohup ./start_local.sh --port "$PORT" --models "$DIR/models" --data "$DIR/data" >/dev/null 2>&1 &
 for _ in $(seq 1 600); do
   if curl -sf -o /dev/null "http://127.0.0.1:$PORT/"; then break; fi
   sleep 1
@@ -75,7 +78,7 @@ done
 if curl -sf -o /dev/null "http://127.0.0.1:$PORT/"; then
   say "Lead Role is running at http://127.0.0.1:$PORT"
   open "http://127.0.0.1:$PORT"
-  echo "To stop it later:  pkill -f run_local.py"
+  echo "To stop it later:  pkill -f start_local.sh; pkill -f run_local.py"
   echo "Log file:          $DIR/server.log"
 else
   die "The app didn't start. Send the last lines of $DIR/server.log to Claude:  tail -30 $DIR/server.log"
